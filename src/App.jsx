@@ -4,6 +4,7 @@ import { supabase } from "./supabaseClient";
 import {
   LayoutDashboard, Package, ShoppingCart, Boxes, Truck, Wallet,
   Calculator, Plus, Trash2, Download, Loader2, TrendingUp, TrendingDown, Printer,
+  LogOut, Users,
 } from "lucide-react";
 
 const PRINT_STYLES = `
@@ -78,7 +79,7 @@ const STORAGE_KEY = "zaro-erp-data-v1";
 const fmt = (n) => (isFinite(n) ? Math.round(n).toLocaleString("en-US") : "0") + " ج.م";
 const pct = (n) => (isFinite(n) ? (n * 100).toFixed(1) : "0") + "%";
 
-function useZaroData() {
+function useZaroData(role) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState("idle");
@@ -87,9 +88,12 @@ function useZaroData() {
   useEffect(() => {
     (async () => {
       const { data: row, error } = await supabase.from("zaro_state").select("data").eq("id", 1).single();
-      if (error || !row || !row.data || Object.keys(row.data).length === 0) {
-        // أول تشغيل: ابعت البيانات الافتراضية
-        await supabase.from("zaro_state").update({ data: DEFAULT_DATA }).eq("id", 1);
+      const isEmpty = error || !row || !row.data || Object.keys(row.data).length === 0;
+      if (isEmpty) {
+        if (role === "owner") {
+          // أول تشغيل: الأونر بس يقدر يعمل seed للبيانات الافتراضية
+          await supabase.rpc("zaro_seed", { p_data: DEFAULT_DATA });
+        }
         setData(DEFAULT_DATA);
       } else {
         setData(row.data);
@@ -110,18 +114,21 @@ function useZaroData() {
       .subscribe();
 
     return () => supabase.removeChannel(channel);
-  }, []);
+  }, [role]);
 
-  const save = useCallback(async (next) => {
-    setData(next);
+  // كل تعديل بيتبعت بس للقسم اللي تغيّر (مثلاً orders أو products) —
+  // السيرفر (RPC: zaro_update_section) هو اللي يتحقق فعليًا إن الصلاحية تسمح بالتعديل على القسم ده
+  const saveSection = useCallback(async (section, next) => {
+    setData((prev) => ({ ...prev, [section]: next }));
     setSaveState("saving");
     skipNextRealtime.current = true;
-    const { error } = await supabase.from("zaro_state").update({ data: next, updated_at: new Date().toISOString() }).eq("id", 1);
+    const { error } = await supabase.rpc("zaro_update_section", { p_section: section, p_payload: next });
     setSaveState(error ? "error" : "saved");
     setTimeout(() => setSaveState("idle"), 1200);
+    if (error) console.error(error);
   }, []);
 
-  return { data, setData: save, loading, saveState };
+  return { data, saveSection, loading, saveState };
 }
 
 function computeOrder(order, products, companies) {
@@ -204,8 +211,8 @@ function Btn({ children, onClick, variant = "primary", icon: Icon, ...props }) {
   );
 }
 
-export default function ZaroERP() {
-  const { data, setData, loading, saveState } = useZaroData();
+export default function ZaroERP({ role, email, onSignOut }) {
+  const { data, saveSection, loading, saveState } = useZaroData(role);
   const [tab, setTab] = useState("dashboard");
 
   if (loading || !data) {
@@ -215,6 +222,12 @@ export default function ZaroERP() {
       </div>
     );
   }
+
+  const isOwner = role === "owner";
+  const canEditOrders = role === "owner" || role === "accountant";
+  const canEditCollections = role === "owner" || role === "accountant";
+  const canEditOther = role === "owner"; // منتجات، مخزون، شركات شحن، مصاريف، Max CPP
+  const roleLabel = role === "owner" ? "أونر" : role === "accountant" ? "محاسب" : "مشاهدة فقط";
 
   const computedOrders = data.orders.map((o) => computeOrder(o, data.products, data.shippingCompanies));
 
@@ -264,7 +277,7 @@ export default function ZaroERP() {
   });
 
   // ---------- mutation helpers ----------
-  const update = (key, next) => setData({ ...data, [key]: next });
+  const update = (key, next) => saveSection(key, next);
   const addRow = (key, row) => update(key, [...data[key], row]);
   const removeRow = (key, idx) => update(key, data[key].filter((_, i) => i !== idx));
   const editRow = (key, idx, field, value) =>
@@ -372,6 +385,7 @@ export default function ZaroERP() {
     { id: "shipping", label: "الشحن", icon: Truck },
     { id: "expenses", label: "المصاريف", icon: Wallet },
     { id: "cpp", label: "Max CPP", icon: Calculator },
+    ...(isOwner ? [{ id: "users", label: "المستخدمين", icon: Users }] : []),
   ];
 
   const currentTabLabel = tabs.find((t) => t.id === tab)?.label || "";
@@ -401,9 +415,16 @@ export default function ZaroERP() {
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <div className="text-[10px] text-gray-400 text-left hidden md:block" dir="ltr">
+            {email}
+            <div className="text-right font-bold" style={{ color: BURGUNDY }} dir="rtl">{roleLabel}</div>
+          </div>
           <Btn onClick={() => window.print()} icon={Printer} variant="secondary">طباعة الشاشة دي</Btn>
           <Btn onClick={exportExcel} icon={Download}>تصدير Excel</Btn>
+          <button onClick={onSignOut} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 px-1" title="تسجيل خروج">
+            <LogOut size={15} />
+          </button>
         </div>
       </div>
 
@@ -464,26 +485,28 @@ export default function ZaroERP() {
           <OrdersTab
             data={data} computedOrders={computedOrders}
             addRow={addRow} removeRow={removeRow} editRow={editRow}
+            readOnly={!canEditOrders}
           />
         )}
 
         {tab === "products" && (
-          <ProductsTab data={data} addRow={addRow} removeRow={removeRow} editRow={editRow} />
+          <ProductsTab data={data} addRow={addRow} removeRow={removeRow} editRow={editRow} readOnly={!canEditOther} />
         )}
 
         {tab === "inventory" && (
-          <InventoryTab inventoryComputed={inventoryComputed} editRow={editRow} />
+          <InventoryTab inventoryComputed={inventoryComputed} editRow={editRow} readOnly={!canEditOther} />
         )}
 
         {tab === "shipping" && (
           <ShippingTab
             data={data} collectionsComputed={collectionsComputed}
             addRow={addRow} removeRow={removeRow} editRow={editRow}
+            readOnlyCompanies={!canEditOther} readOnlyCollections={!canEditCollections}
           />
         )}
 
         {tab === "expenses" && (
-          <ExpensesTab data={data} addRow={addRow} removeRow={removeRow} editRow={editRow} totalAds={totalAds} totalFixed={totalFixed} />
+          <ExpensesTab data={data} addRow={addRow} removeRow={removeRow} editRow={editRow} totalAds={totalAds} totalFixed={totalFixed} readOnly={!canEditOther} />
         )}
 
         {tab === "cpp" && (
@@ -493,41 +516,46 @@ export default function ZaroERP() {
             profitIfDelivered={profitIfDelivered} lossIfReturned={lossIfReturned}
             expectedPerConfirmed={expectedPerConfirmed} expectedPerPurchase={expectedPerPurchase}
             breakevenCpp={breakevenCpp} maxCpp={maxCpp} decision={decision} decisionColor={decisionColor}
+            readOnly={!canEditOther}
           />
         )}
+
+        {tab === "users" && isOwner && <UsersTab />}
       </div>
     </div>
   );
 }
 
-function OrdersTab({ data, computedOrders, addRow, removeRow, editRow }) {
+function OrdersTab({ data, computedOrders, addRow, removeRow, editRow, readOnly }) {
   const [form, setForm] = useState({ id: "", date: "", customer: "", product: data.products[0]?.name || "", qty: 1, company: data.shippingCompanies[0]?.name || "", status: STATUS_OPTIONS[0], notes: "" });
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-8 gap-2 items-end" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
-        <div><label className="text-[10px] text-gray-500">رقم الأوردر</label><Input value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="ORD-1005" /></div>
-        <div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
-        <div><label className="text-[10px] text-gray-500">العميل</label><Input value={form.customer} onChange={(e) => setForm({ ...form, customer: e.target.value })} /></div>
-        <div><label className="text-[10px] text-gray-500">المنتج</label>
-          <Select value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value })}>
-            {data.products.map((p) => <option key={p.code} value={p.name}>{p.name}</option>)}
-          </Select>
+      {!readOnly && (
+        <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-8 gap-2 items-end" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+          <div><label className="text-[10px] text-gray-500">رقم الأوردر</label><Input value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="ORD-1005" /></div>
+          <div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">العميل</label><Input value={form.customer} onChange={(e) => setForm({ ...form, customer: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">المنتج</label>
+            <Select value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value })}>
+              {data.products.map((p) => <option key={p.code} value={p.name}>{p.name}</option>)}
+            </Select>
+          </div>
+          <div><label className="text-[10px] text-gray-500">الكمية</label><Input type="number" min="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">شركة الشحن</label>
+            <Select value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })}>
+              {data.shippingCompanies.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+            </Select>
+          </div>
+          <div><label className="text-[10px] text-gray-500">الحالة</label>
+            <Select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+              {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+            </Select>
+          </div>
+          <Btn icon={Plus} onClick={() => { if (!form.id) return; addRow("orders", form); setForm({ ...form, id: "", customer: "" }); }}>
+            إضافة
+          </Btn>
         </div>
-        <div><label className="text-[10px] text-gray-500">الكمية</label><Input type="number" min="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></div>
-        <div><label className="text-[10px] text-gray-500">شركة الشحن</label>
-          <Select value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })}>
-            {data.shippingCompanies.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-          </Select>
-        </div>
-        <div><label className="text-[10px] text-gray-500">الحالة</label>
-          <Select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
-            {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </Select>
-        </div>
-        <Btn icon={Plus} onClick={() => { if (!form.id) return; addRow("orders", form); setForm({ ...form, id: "", customer: "" }); }}>
-          إضافة
-        </Btn>
-      </div>
+      )}
 
       <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
         <table className="w-full">
@@ -541,12 +569,12 @@ function OrdersTab({ data, computedOrders, addRow, removeRow, editRow }) {
                 <Td>{o.id}</Td><Td>{o.date}</Td><Td>{o.customer}</Td><Td>{o.product}</Td><Td>{o.qty}</Td>
                 <Td>{fmt(o.totalSale)}</Td><Td>{fmt(o.shipCost)}</Td><Td>{o.company}</Td>
                 <Td>
-                  <Select value={o.status} onChange={(e) => editRow("orders", i, "status", e.target.value)}>
+                  <Select value={o.status} disabled={readOnly} onChange={(e) => editRow("orders", i, "status", e.target.value)}>
                     {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
                   </Select>
                 </Td>
                 <Td className="font-bold" style={{ color: o.netProfit >= 0 ? "#15803D" : "#B91C1C" }}>{fmt(o.netProfit)}</Td>
-                <Td><button onClick={() => removeRow("orders", i)}><Trash2 size={13} color="#B91C1C" /></button></Td>
+                <Td>{!readOnly && <button onClick={() => removeRow("orders", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
               </tr>
             ))}
           </tbody>
@@ -556,22 +584,24 @@ function OrdersTab({ data, computedOrders, addRow, removeRow, editRow }) {
   );
 }
 
-function ProductsTab({ data, addRow, removeRow, editRow }) {
+function ProductsTab({ data, addRow, removeRow, editRow, readOnly }) {
   const [form, setForm] = useState({ code: "", name: "", price: "", cost: "" });
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-5 gap-2 items-end" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
-        <div><label className="text-[10px] text-gray-500">كود</label><Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} /></div>
-        <div><label className="text-[10px] text-gray-500">الاسم</label><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
-        <div><label className="text-[10px] text-gray-500">سعر البيع</label><Input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></div>
-        <div><label className="text-[10px] text-gray-500">التكلفة</label><Input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></div>
-        <Btn icon={Plus} onClick={() => {
-          if (!form.name) return;
-          addRow("products", { ...form, price: Number(form.price) || 0, cost: Number(form.cost) || 0 });
-          addRow("inventory", { code: form.code, available: 0 });
-          setForm({ code: "", name: "", price: "", cost: "" });
-        }}>إضافة</Btn>
-      </div>
+      {!readOnly && (
+        <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-5 gap-2 items-end" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+          <div><label className="text-[10px] text-gray-500">كود</label><Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">الاسم</label><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">سعر البيع</label><Input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">التكلفة</label><Input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></div>
+          <Btn icon={Plus} onClick={() => {
+            if (!form.name) return;
+            addRow("products", { ...form, price: Number(form.price) || 0, cost: Number(form.cost) || 0 });
+            addRow("inventory", { code: form.code, available: 0 });
+            setForm({ code: "", name: "", price: "", cost: "" });
+          }}>إضافة</Btn>
+        </div>
+      )}
       <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
         <table className="w-full">
           <thead><tr><Th>كود</Th><Th>الاسم</Th><Th>سعر البيع</Th><Th>التكلفة</Th><Th>الهامش</Th><Th></Th></tr></thead>
@@ -579,10 +609,10 @@ function ProductsTab({ data, addRow, removeRow, editRow }) {
             {data.products.map((p, i) => (
               <tr key={i}>
                 <Td>{p.code}</Td><Td>{p.name}</Td>
-                <Td><Input type="number" value={p.price} onChange={(e) => editRow("products", i, "price", Number(e.target.value))} /></Td>
-                <Td><Input type="number" value={p.cost} onChange={(e) => editRow("products", i, "cost", Number(e.target.value))} /></Td>
+                <Td><Input type="number" disabled={readOnly} value={p.price} onChange={(e) => editRow("products", i, "price", Number(e.target.value))} /></Td>
+                <Td><Input type="number" disabled={readOnly} value={p.cost} onChange={(e) => editRow("products", i, "cost", Number(e.target.value))} /></Td>
                 <Td className="font-bold" style={{ color: BURGUNDY }}>{fmt(p.price - p.cost)}</Td>
-                <Td><button onClick={() => removeRow("products", i)}><Trash2 size={13} color="#B91C1C" /></button></Td>
+                <Td>{!readOnly && <button onClick={() => removeRow("products", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
               </tr>
             ))}
           </tbody>
@@ -592,7 +622,7 @@ function ProductsTab({ data, addRow, removeRow, editRow }) {
   );
 }
 
-function InventoryTab({ inventoryComputed, editRow }) {
+function InventoryTab({ inventoryComputed, editRow, readOnly }) {
   return (
     <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
       <table className="w-full">
@@ -601,7 +631,7 @@ function InventoryTab({ inventoryComputed, editRow }) {
           {inventoryComputed.map((inv, i) => (
             <tr key={i}>
               <Td>{inv.name}</Td>
-              <Td><Input type="number" value={inv.available} onChange={(e) => editRow("inventory", i, "available", Number(e.target.value))} /></Td>
+              <Td><Input type="number" disabled={readOnly} value={inv.available} onChange={(e) => editRow("inventory", i, "available", Number(e.target.value))} /></Td>
               <Td>{inv.sold}</Td>
               <Td className="font-bold">{inv.remaining}</Td>
               <Td>{fmt(inv.value)}</Td>
@@ -614,7 +644,7 @@ function InventoryTab({ inventoryComputed, editRow }) {
   );
 }
 
-function ShippingTab({ data, collectionsComputed, addRow, removeRow, editRow }) {
+function ShippingTab({ data, collectionsComputed, addRow, removeRow, editRow, readOnlyCompanies, readOnlyCollections }) {
   const [form, setForm] = useState({ date: "", company: data.shippingCompanies[0]?.name || "", received: "" });
   return (
     <div className="space-y-5">
@@ -627,8 +657,8 @@ function ShippingTab({ data, collectionsComputed, addRow, removeRow, editRow }) 
               {data.shippingCompanies.map((c, i) => (
                 <tr key={i}>
                   <Td>{c.name}</Td>
-                  <Td><Input type="number" value={c.cost} onChange={(e) => editRow("shippingCompanies", i, "cost", Number(e.target.value))} /></Td>
-                  <Td><Input type="number" step="0.001" value={c.feePct} onChange={(e) => editRow("shippingCompanies", i, "feePct", Number(e.target.value))} /></Td>
+                  <Td><Input type="number" disabled={readOnlyCompanies} value={c.cost} onChange={(e) => editRow("shippingCompanies", i, "cost", Number(e.target.value))} /></Td>
+                  <Td><Input type="number" step="0.001" disabled={readOnlyCompanies} value={c.feePct} onChange={(e) => editRow("shippingCompanies", i, "feePct", Number(e.target.value))} /></Td>
                 </tr>
               ))}
             </tbody>
@@ -637,16 +667,18 @@ function ShippingTab({ data, collectionsComputed, addRow, removeRow, editRow }) 
       </div>
       <div>
         <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>التحصيلات</div>
-        <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-4 gap-2 items-end mb-2" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
-          <div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">الشركة</label>
-            <Select value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })}>
-              {data.shippingCompanies.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-            </Select>
+        {!readOnlyCollections && (
+          <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-4 gap-2 items-end mb-2" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+            <div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
+            <div><label className="text-[10px] text-gray-500">الشركة</label>
+              <Select value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })}>
+                {data.shippingCompanies.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+              </Select>
+            </div>
+            <div><label className="text-[10px] text-gray-500">المستلم فعليًا</label><Input type="number" value={form.received} onChange={(e) => setForm({ ...form, received: e.target.value })} /></div>
+            <Btn icon={Plus} onClick={() => { addRow("collections", { ...form, received: Number(form.received) || 0 }); setForm({ ...form, received: "" }); }}>إضافة</Btn>
           </div>
-          <div><label className="text-[10px] text-gray-500">المستلم فعليًا</label><Input type="number" value={form.received} onChange={(e) => setForm({ ...form, received: e.target.value })} /></div>
-          <Btn icon={Plus} onClick={() => { addRow("collections", { ...form, received: Number(form.received) || 0 }); setForm({ ...form, received: "" }); }}>إضافة</Btn>
-        </div>
+        )}
         <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
           <table className="w-full">
             <thead><tr><Th>التاريخ</Th><Th>الشركة</Th><Th>عدد المُسلّم</Th><Th>المفروض تحصيله</Th><Th>المستلم</Th><Th>الفرق</Th><Th>الحالة</Th><Th></Th></tr></thead>
@@ -657,7 +689,7 @@ function ShippingTab({ data, collectionsComputed, addRow, removeRow, editRow }) 
                   <Td>{fmt(c.expected)}</Td><Td>{fmt(c.received)}</Td>
                   <Td className="font-bold" style={{ color: c.diff === 0 ? "#15803D" : "#B91C1C" }}>{fmt(c.diff)}</Td>
                   <Td>{c.statusLabel}</Td>
-                  <Td><button onClick={() => removeRow("collections", i)}><Trash2 size={13} color="#B91C1C" /></button></Td>
+                  <Td>{!readOnlyCollections && <button onClick={() => removeRow("collections", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
                 </tr>
               ))}
             </tbody>
@@ -668,20 +700,22 @@ function ShippingTab({ data, collectionsComputed, addRow, removeRow, editRow }) 
   );
 }
 
-function ExpensesTab({ data, addRow, removeRow, editRow, totalAds, totalFixed }) {
+function ExpensesTab({ data, addRow, removeRow, editRow, totalAds, totalFixed, readOnly }) {
   const [adForm, setAdForm] = useState({ date: "", platform: "فيسبوك", amount: "", orders: "" });
   const [fixForm, setFixForm] = useState({ month: "", item: "", amount: "" });
   return (
     <div className="space-y-6">
       <div>
         <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>مصاريف الإعلانات (إجمالي: {fmt(totalAds)})</div>
-        <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-5 gap-2 items-end mb-2" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
-          <div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={adForm.date} onChange={(e) => setAdForm({ ...adForm, date: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">المنصة</label><Input value={adForm.platform} onChange={(e) => setAdForm({ ...adForm, platform: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">المبلغ</label><Input type="number" value={adForm.amount} onChange={(e) => setAdForm({ ...adForm, amount: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">عدد الأوردرات</label><Input type="number" value={adForm.orders} onChange={(e) => setAdForm({ ...adForm, orders: e.target.value })} /></div>
-          <Btn icon={Plus} onClick={() => { addRow("ads", { ...adForm, amount: Number(adForm.amount) || 0, orders: Number(adForm.orders) || 0 }); setAdForm({ ...adForm, amount: "", orders: "" }); }}>إضافة</Btn>
-        </div>
+        {!readOnly && (
+          <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-5 gap-2 items-end mb-2" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+            <div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={adForm.date} onChange={(e) => setAdForm({ ...adForm, date: e.target.value })} /></div>
+            <div><label className="text-[10px] text-gray-500">المنصة</label><Input value={adForm.platform} onChange={(e) => setAdForm({ ...adForm, platform: e.target.value })} /></div>
+            <div><label className="text-[10px] text-gray-500">المبلغ</label><Input type="number" value={adForm.amount} onChange={(e) => setAdForm({ ...adForm, amount: e.target.value })} /></div>
+            <div><label className="text-[10px] text-gray-500">عدد الأوردرات</label><Input type="number" value={adForm.orders} onChange={(e) => setAdForm({ ...adForm, orders: e.target.value })} /></div>
+            <Btn icon={Plus} onClick={() => { addRow("ads", { ...adForm, amount: Number(adForm.amount) || 0, orders: Number(adForm.orders) || 0 }); setAdForm({ ...adForm, amount: "", orders: "" }); }}>إضافة</Btn>
+          </div>
+        )}
         <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
           <table className="w-full">
             <thead><tr><Th>التاريخ</Th><Th>المنصة</Th><Th>المبلغ</Th><Th>الأوردرات</Th><Th>تكلفة الأوردر</Th><Th></Th></tr></thead>
@@ -690,7 +724,7 @@ function ExpensesTab({ data, addRow, removeRow, editRow, totalAds, totalFixed })
                 <tr key={i}>
                   <Td>{a.date}</Td><Td>{a.platform}</Td><Td>{fmt(a.amount)}</Td><Td>{a.orders}</Td>
                   <Td>{fmt(a.orders ? a.amount / a.orders : 0)}</Td>
-                  <Td><button onClick={() => removeRow("ads", i)}><Trash2 size={13} color="#B91C1C" /></button></Td>
+                  <Td>{!readOnly && <button onClick={() => removeRow("ads", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
                 </tr>
               ))}
             </tbody>
@@ -700,12 +734,14 @@ function ExpensesTab({ data, addRow, removeRow, editRow, totalAds, totalFixed })
 
       <div>
         <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>المصاريف الثابتة (إجمالي: {fmt(totalFixed)})</div>
-        <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-4 gap-2 items-end mb-2" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
-          <div><label className="text-[10px] text-gray-500">الشهر</label><Input value={fixForm.month} onChange={(e) => setFixForm({ ...fixForm, month: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">البند</label><Input value={fixForm.item} onChange={(e) => setFixForm({ ...fixForm, item: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">المبلغ</label><Input type="number" value={fixForm.amount} onChange={(e) => setFixForm({ ...fixForm, amount: e.target.value })} /></div>
-          <Btn icon={Plus} onClick={() => { addRow("fixedCosts", { ...fixForm, amount: Number(fixForm.amount) || 0 }); setFixForm({ month: "", item: "", amount: "" }); }}>إضافة</Btn>
-        </div>
+        {!readOnly && (
+          <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-4 gap-2 items-end mb-2" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+            <div><label className="text-[10px] text-gray-500">الشهر</label><Input value={fixForm.month} onChange={(e) => setFixForm({ ...fixForm, month: e.target.value })} /></div>
+            <div><label className="text-[10px] text-gray-500">البند</label><Input value={fixForm.item} onChange={(e) => setFixForm({ ...fixForm, item: e.target.value })} /></div>
+            <div><label className="text-[10px] text-gray-500">المبلغ</label><Input type="number" value={fixForm.amount} onChange={(e) => setFixForm({ ...fixForm, amount: e.target.value })} /></div>
+            <Btn icon={Plus} onClick={() => { addRow("fixedCosts", { ...fixForm, amount: Number(fixForm.amount) || 0 }); setFixForm({ month: "", item: "", amount: "" }); }}>إضافة</Btn>
+          </div>
+        )}
         <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
           <table className="w-full">
             <thead><tr><Th>الشهر</Th><Th>البند</Th><Th>المبلغ</Th><Th></Th></tr></thead>
@@ -713,7 +749,7 @@ function ExpensesTab({ data, addRow, removeRow, editRow, totalAds, totalFixed })
               {data.fixedCosts.map((f, i) => (
                 <tr key={i}>
                   <Td>{f.month}</Td><Td>{f.item}</Td><Td>{fmt(f.amount)}</Td>
-                  <Td><button onClick={() => removeRow("fixedCosts", i)}><Trash2 size={13} color="#B91C1C" /></button></Td>
+                  <Td>{!readOnly && <button onClick={() => removeRow("fixedCosts", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
                 </tr>
               ))}
             </tbody>
@@ -724,7 +760,7 @@ function ExpensesTab({ data, addRow, removeRow, editRow, totalAds, totalFixed })
   );
 }
 
-function CppTab({ cpp, editCpp, fixedPerOrder, marginMoney, profitIfDelivered, lossIfReturned, expectedPerConfirmed, expectedPerPurchase, breakevenCpp, maxCpp, decision, decisionColor }) {
+function CppTab({ cpp, editCpp, fixedPerOrder, marginMoney, profitIfDelivered, lossIfReturned, expectedPerConfirmed, expectedPerPurchase, breakevenCpp, maxCpp, decision, decisionColor, readOnly }) {
   const fields = [
     ["salePrice", "سعر البيع"], ["cost", "تكلفة المنتج"], ["shipFwd", "شحن ذهاب"], ["shipRet", "شحن مرتجع"],
     ["codFeePct", "نسبة عمولة التحصيل"], ["confRate", "نسبة التأكيد"], ["delRate", "نسبة التسليم"],
@@ -738,12 +774,12 @@ function CppTab({ cpp, editCpp, fixedPerOrder, marginMoney, profitIfDelivered, l
           {fields.map(([key, label]) => (
             <div key={key} className="flex items-center justify-between gap-2">
               <label className="text-xs text-gray-600 w-1/2">{label}</label>
-              <Input type="number" step="0.01" value={cpp[key]} onChange={(e) => editCpp(key, Number(e.target.value))} />
+              <Input type="number" step="0.01" disabled={readOnly} value={cpp[key]} onChange={(e) => editCpp(key, Number(e.target.value))} />
             </div>
           ))}
           <div className="flex items-center justify-between gap-2 pt-2 border-t mt-2">
             <label className="text-xs font-bold text-gray-700 w-1/2">CPP الفعلي الحالي</label>
-            <Input type="number" value={cpp.actualCpp} onChange={(e) => editCpp("actualCpp", Number(e.target.value))} />
+            <Input type="number" disabled={readOnly} value={cpp.actualCpp} onChange={(e) => editCpp("actualCpp", Number(e.target.value))} />
           </div>
         </div>
       </div>
@@ -776,6 +812,82 @@ function Row({ label, value }) {
     <div className="flex items-center justify-between text-xs">
       <span className="text-gray-600">{label}</span>
       <span className="font-bold" style={{ color: CHARCOAL }}>{value}</span>
+    </div>
+  );
+}
+
+function UsersTab() {
+  const [profiles, setProfiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    supabase
+      .from("profiles")
+      .select("id, email, full_name, role, created_at")
+      .order("created_at", { ascending: false })
+      .then(({ data }) => {
+        setProfiles(data || []);
+        setLoading(false);
+      });
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const setRole = async (id, role) => {
+    const { error } = await supabase.rpc("zaro_set_user_role", { p_user_id: id, p_role: role });
+    if (!error) load();
+  };
+
+  const roleText = (r) =>
+    r === "pending" ? "بانتظار الموافقة" : r === "owner" ? "أونر" : r === "accountant" ? "محاسب" : "مشاهدة فقط";
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-gray-500 text-xs">
+        <Loader2 className="animate-spin" size={16} /> جاري التحميل...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="text-xs text-gray-500">
+        وافق على أي حساب جديد سجّل دخول بجوجل عن طريق تغيير صلاحيته من "بانتظار الموافقة" لأي صلاحية تانية.
+      </div>
+      <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
+        <table className="w-full">
+          <thead>
+            <tr>
+              <Th>الإيميل</Th>
+              <Th>الاسم</Th>
+              <Th>الصلاحية الحالية</Th>
+              <Th>تغيير الصلاحية</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {profiles.map((p) => (
+              <tr key={p.id}>
+                <Td>{p.email}</Td>
+                <Td>{p.full_name || "—"}</Td>
+                <Td className="font-bold" style={{ color: p.role === "pending" ? "#B45309" : BURGUNDY }}>
+                  {roleText(p.role)}
+                </Td>
+                <Td>
+                  <Select value={p.role} onChange={(e) => setRole(p.id, e.target.value)}>
+                    <option value="pending">بانتظار الموافقة</option>
+                    <option value="accountant">محاسب</option>
+                    <option value="viewer">مشاهدة فقط</option>
+                    <option value="owner">أونر</option>
+                  </Select>
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
