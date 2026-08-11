@@ -22,11 +22,10 @@ create policy "owner reads all profiles" on public.profiles
     exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'owner')
   );
 
+-- لا تسمح بتعديل profiles مباشرة من المتصفح. تغيير الصلاحيات يتم فقط عبر RPC
+-- تتحقق من أن المستدعي هو Owner.
 drop policy if exists "owner updates profiles" on public.profiles;
-create policy "owner updates profiles" on public.profiles
-  for update using (
-    exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'owner')
-  );
+drop policy if exists "profiles are viewable by any authenticated user" on public.profiles;
 
 -- 2) auto-create a profile row (role = pending) whenever someone signs in for the first time
 create or replace function public.handle_new_user()
@@ -37,7 +36,7 @@ begin
   on conflict (id) do nothing;
   return new;
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = public;
 
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
@@ -80,7 +79,7 @@ begin
       updated_at = now()
   where id = 1;
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = public;
 
 -- 5) owner-only seed RPC (used once to populate default data)
 create or replace function public.zaro_seed(p_data jsonb)
@@ -96,7 +95,7 @@ begin
   set data = p_data, updated_at = now()
   where id = 1 and (data = '{}'::jsonb or data is null);
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = public;
 
 -- 6) owner-only RPC to approve users / change roles
 create or replace function public.zaro_set_user_role(p_user_id uuid, p_role text)
@@ -113,4 +112,12 @@ begin
   end if;
   update public.profiles set role = p_role where id = p_user_id;
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = public;
+
+-- لا تمنح التنفيذ تلقائياً لأي دور؛ فقط المستخدم المسجل يحتاج هذه الدوال.
+revoke execute on function public.zaro_update_section(text, jsonb) from public;
+revoke execute on function public.zaro_seed(jsonb) from public;
+revoke execute on function public.zaro_set_user_role(uuid, text) from public;
+grant execute on function public.zaro_update_section(text, jsonb) to authenticated;
+grant execute on function public.zaro_seed(jsonb) to authenticated;
+grant execute on function public.zaro_set_user_role(uuid, text) to authenticated;

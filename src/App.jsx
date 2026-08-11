@@ -819,15 +819,18 @@ function Row({ label, value }) {
 function UsersTab() {
   const [profiles, setProfiles] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const load = () => {
     setLoading(true);
+    setErrorMessage("");
     supabase
       .from("profiles")
       .select("id, email, full_name, role, created_at")
       .order("created_at", { ascending: false })
-      .then(({ data }) => {
+      .then(({ data, error }) => {
         setProfiles(data || []);
+        if (error) setErrorMessage("تعذر تحميل المستخدمين. حاول مرة أخرى.");
         setLoading(false);
       });
   };
@@ -838,7 +841,11 @@ function UsersTab() {
 
   const setRole = async (id, role) => {
     const { error } = await supabase.rpc("zaro_set_user_role", { p_user_id: id, p_role: role });
-    if (!error) load();
+    if (error) {
+      setErrorMessage("تعذر تحديث الصلاحية. حاول مرة أخرى.");
+      return;
+    }
+    load();
   };
 
   const roleText = (r) =>
@@ -854,6 +861,7 @@ function UsersTab() {
 
   return (
     <div className="space-y-3">
+      {errorMessage && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{errorMessage}</div>}
       <div className="text-xs text-gray-500">
         وافق على أي حساب جديد سجّل دخول بجوجل عن طريق تغيير صلاحيته من "بانتظار الموافقة" لأي صلاحية تانية.
       </div>
