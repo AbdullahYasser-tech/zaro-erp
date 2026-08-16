@@ -4,7 +4,7 @@ import { supabase } from "./supabaseClient";
 import {
   LayoutDashboard, Package, ShoppingCart, Boxes, Truck, Wallet,
   Calculator, Plus, Trash2, Download, Loader2, TrendingUp, TrendingDown, Printer,
-  LogOut, Users,
+  LogOut, Users, Search, Filter, History, RefreshCw,
 } from "lucide-react";
 
 const PRINT_STYLES = `
@@ -41,6 +41,7 @@ const DEFAULT_DATA = {
     { code: "BELT01", available: 80 },
     { code: "SUNGLASS01", available: 50 },
   ],
+  inventoryMovements: [],
   shippingCompanies: [
     { name: "Bosta", cost: 65, feePct: 0.02, days: 7 },
     { name: "Mylerz", cost: 60, feePct: 0.015, days: 10 },
@@ -79,6 +80,43 @@ const STORAGE_KEY = "zaro-erp-data-v1";
 const fmt = (n) => (isFinite(n) ? Math.round(n).toLocaleString("en-US") : "0") + " ج.م";
 const pct = (n) => (isFinite(n) ? (n * 100).toFixed(1) : "0") + "%";
 
+const isNonNegativeNumber = (value) => Number.isFinite(Number(value)) && Number(value) >= 0;
+const isRatio = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 1;
+
+function validateSection(section, payload) {
+  if (!payload || (typeof payload !== "object" && !Array.isArray(payload))) return "البيانات غير صالحة.";
+  if (section === "orders") {
+    const ids = new Set();
+    for (const order of payload) {
+      if (!order.id?.trim() || !order.date || !order.customer?.trim() || !order.product || !order.company) return "كل أوردر يحتاج رقمًا وتاريخًا وعميلًا ومنتجًا وشركة شحن.";
+      if (ids.has(order.id.trim())) return `رقم الأوردر ${order.id} مكرر. استخدم رقمًا مختلفًا.`;
+      ids.add(order.id.trim());
+      if (!Number.isInteger(Number(order.qty)) || Number(order.qty) < 1) return `كمية الأوردر ${order.id} يجب أن تكون رقمًا صحيحًا أكبر من صفر.`;
+      if (!STATUS_OPTIONS.includes(order.status)) return `حالة الأوردر ${order.id} غير معروفة.`;
+    }
+  }
+  if (section === "products") {
+    const codes = new Set();
+    for (const product of payload) {
+      if (!product.code?.trim() || !product.name?.trim()) return "كل منتج يحتاج كودًا واسمًا.";
+      if (codes.has(product.code.trim())) return `كود المنتج ${product.code} مكرر.`;
+      codes.add(product.code.trim());
+      if (!isNonNegativeNumber(product.price) || !isNonNegativeNumber(product.cost)) return `سعر وتكلفة المنتج ${product.name} يجب أن تكون أرقامًا موجبة أو صفرًا.`;
+    }
+  }
+  if (section === "inventory" && payload.some((row) => !isNonNegativeNumber(row.available))) return "كميات المخزون لا يمكن أن تكون سالبة.";
+  if (section === "inventoryMovements" && payload.some((row) => !row.date || !row.code || !row.reason?.trim() || !Number.isInteger(Number(row.qty)) || Number(row.qty) < 1 || !["إضافة", "خصم"].includes(row.type))) return "حركة المخزون تحتاج تاريخًا ومنتجًا وسببًا وكمية صحيحة أكبر من صفر.";
+  if (section === "shippingCompanies" && payload.some((row) => !isNonNegativeNumber(row.cost) || !isRatio(row.feePct))) return "تكلفة الشحن يجب ألا تكون سالبة ونسبة العمولة بين 0% و100%.";
+  if (section === "collections" && payload.some((row) => !row.date || !row.company || !isNonNegativeNumber(row.received))) return "كل تحصيل يحتاج تاريخًا وشركة ومبلغًا غير سالب.";
+  if (section === "ads" && payload.some((row) => !row.date || !row.platform?.trim() || !isNonNegativeNumber(row.amount) || !isNonNegativeNumber(row.orders))) return "مصروف الإعلان يحتاج تاريخًا ومنصة ومبالغ غير سالبة.";
+  if (section === "fixedCosts" && payload.some((row) => !row.month?.trim() || !row.item?.trim() || !isNonNegativeNumber(row.amount))) return "كل مصروف ثابت يحتاج شهرًا وبندًا ومبلغًا غير سالب.";
+  if (section === "cpp") {
+    const ratioFields = ["codFeePct", "confRate", "delRate", "marginPct"];
+    if (ratioFields.some((field) => !isRatio(payload[field])) || ["salePrice", "cost", "shipFwd", "shipRet", "expectedOrders", "actualCpp"].some((field) => !isNonNegativeNumber(payload[field]))) return "مدخلات Max CPP يجب أن تكون أرقامًا صحيحة والنسب بين 0% و100%.";
+  }
+  return "";
+}
+
 function useZaroData(role) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -96,7 +134,7 @@ function useZaroData(role) {
         }
         setData(DEFAULT_DATA);
       } else {
-        setData(row.data);
+        setData({ ...DEFAULT_DATA, ...row.data, inventoryMovements: row.data.inventoryMovements || [] });
       }
       setLoading(false);
     })();
@@ -119,16 +157,49 @@ function useZaroData(role) {
   // كل تعديل بيتبعت بس للقسم اللي تغيّر (مثلاً orders أو products) —
   // السيرفر (RPC: zaro_update_section) هو اللي يتحقق فعليًا إن الصلاحية تسمح بالتعديل على القسم ده
   const saveSection = useCallback(async (section, next) => {
+    const previous = data?.[section];
     setData((prev) => ({ ...prev, [section]: next }));
     setSaveState("saving");
     skipNextRealtime.current = true;
     const { error } = await supabase.rpc("zaro_update_section", { p_section: section, p_payload: next });
-    setSaveState(error ? "error" : "saved");
-    setTimeout(() => setSaveState("idle"), 1200);
-    if (error) console.error(error);
+    if (error) {
+      setData((prev) => ({ ...prev, [section]: previous }));
+      skipNextRealtime.current = false;
+      setSaveState("error");
+      console.error(error);
+    } else {
+      setSaveState("saved");
+    }
+    setTimeout(() => setSaveState("idle"), 1600);
+    return !error;
+  }, [data]);
+
+  const applyInventoryMovement = useCallback(async (movement) => {
+    setSaveState("saving");
+    const { error } = await supabase.rpc("zaro_apply_inventory_movement", {
+      p_code: movement.code,
+      p_type: movement.type,
+      p_qty: Number(movement.qty),
+      p_reason: movement.reason,
+      p_date: movement.date,
+    });
+    if (error) {
+      setSaveState("error");
+      console.error(error);
+      return { ok: false, error };
+    }
+    setData((prev) => {
+      const inventory = prev.inventory.map((item) => item.code === movement.code
+        ? { ...item, available: Number(item.available || 0) + (movement.type === "إضافة" ? Number(movement.qty) : -Number(movement.qty)) }
+        : item);
+      return { ...prev, inventory, inventoryMovements: [...(prev.inventoryMovements || []), { ...movement, qty: Number(movement.qty), id: crypto.randomUUID() }] };
+    });
+    setSaveState("saved");
+    setTimeout(() => setSaveState("idle"), 1600);
+    return { ok: true };
   }, []);
 
-  return { data, saveSection, loading, saveState };
+  return { data, saveSection, applyInventoryMovement, loading, saveState };
 }
 
 function computeOrder(order, products, companies) {
@@ -212,8 +283,9 @@ function Btn({ children, onClick, variant = "primary", icon: Icon, ...props }) {
 }
 
 export default function ZaroERP({ role, email, onSignOut }) {
-  const { data, saveSection, loading, saveState } = useZaroData(role);
+  const { data, saveSection, applyInventoryMovement, loading, saveState } = useZaroData(role);
   const [tab, setTab] = useState("dashboard");
+  const [validationMessage, setValidationMessage] = useState("");
 
   if (loading || !data) {
     return (
@@ -277,7 +349,15 @@ export default function ZaroERP({ role, email, onSignOut }) {
   });
 
   // ---------- mutation helpers ----------
-  const update = (key, next) => saveSection(key, next);
+  const update = (key, next) => {
+    const message = validateSection(key, next);
+    if (message) {
+      setValidationMessage(message);
+      return false;
+    }
+    setValidationMessage("");
+    return saveSection(key, next);
+  };
   const addRow = (key, row) => update(key, [...data[key], row]);
   const removeRow = (key, idx) => update(key, data[key].filter((_, i) => i !== idx));
   const editRow = (key, idx, field, value) =>
@@ -404,7 +484,8 @@ export default function ZaroERP({ role, email, onSignOut }) {
 
       {/* Header */}
       <div className="zaro-no-print flex items-center justify-between px-5 py-3 border-b" style={{ borderColor: "#eee" }}>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+
           <div className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-white text-xs" style={{ background: BURGUNDY }}>
             ZARO
           </div>
@@ -428,6 +509,12 @@ export default function ZaroERP({ role, email, onSignOut }) {
         </div>
       </div>
 
+      {validationMessage && (
+        <div className="zaro-no-print mx-5 mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800" role="alert">
+          {validationMessage}
+        </div>
+      )}
+
       <div className="zaro-no-print flex flex-wrap gap-1 px-5 py-2 border-b" style={{ borderColor: "#eee", background: "#FAFAFA" }}>
         {tabs.map((t) => (
           <button
@@ -442,44 +529,7 @@ export default function ZaroERP({ role, email, onSignOut }) {
       </div>
 
       <div className="p-5">
-        {tab === "dashboard" && (
-          <div className="space-y-5">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Card label="إجمالي الأوردرات" value={data.orders.length} icon={ShoppingCart} />
-              <Card label="تم تسليمها" value={delivered.length} icon={TrendingUp} positive />
-              <Card label="مرتجعة" value={returned.length} icon={TrendingDown} negative />
-              <Card label="نسبة التسليم" value={pct(deliveryRate)} icon={Truck} />
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Card label="إجمالي المبيعات" value={fmt(totalSales)} />
-              <Card label="تكلفة المنتجات" value={fmt(totalCOGS)} />
-              <Card label="تكلفة الشحن" value={fmt(totalShip)} />
-              <Card label="عمولات التحصيل" value={fmt(totalCOD)} />
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Card label="الربح التشغيلي" value={fmt(operatingProfit)} positive={operatingProfit >= 0} negative={operatingProfit < 0} />
-              <Card label="مصاريف الإعلانات" value={fmt(totalAds)} />
-              <Card label="المصاريف الثابتة" value={fmt(totalFixed)} />
-              <Card label="صافي الربح النهائي" value={fmt(finalProfit)} big positive={finalProfit >= 0} negative={finalProfit < 0} />
-            </div>
-            <div className="rounded-xl border overflow-hidden" style={{ borderColor: "#E5D3D5" }}>
-              <div className="px-3 py-2 text-xs font-bold" style={{ background: SECTION_BG, color: BURGUNDY }}>
-                ترتيب المنتجات حسب الربحية
-              </div>
-              <table className="w-full">
-                <thead><tr><Th>المنتج</Th><Th>أوردرات مُسلّمة</Th><Th>إجمالي الربح</Th></tr></thead>
-                <tbody>
-                  {productStats.map((p, i) => (
-                    <tr key={i}>
-                      <Td>{p.name}</Td><Td>{p.deliveredCount}</Td>
-                      <Td className="font-bold" style={{ color: BURGUNDY }}>{fmt(p.totalProfit)}</Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
+        {tab === "dashboard" && <DashboardTab data={data} computedOrders={computedOrders} />}
 
         {tab === "orders" && (
           <OrdersTab
@@ -494,7 +544,7 @@ export default function ZaroERP({ role, email, onSignOut }) {
         )}
 
         {tab === "inventory" && (
-          <InventoryTab inventoryComputed={inventoryComputed} editRow={editRow} readOnly={!canEditOther} />
+          <InventoryTab data={data} inventoryComputed={inventoryComputed} inventoryMovements={data.inventoryMovements || []} applyInventoryMovement={applyInventoryMovement} editRow={editRow} readOnly={!canEditOther} />
         )}
 
         {tab === "shipping" && (
@@ -526,55 +576,104 @@ export default function ZaroERP({ role, email, onSignOut }) {
   );
 }
 
+function DashboardTab({ data, computedOrders }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const inPeriod = (date) => (!from || date >= from) && (!to || date <= to);
+  const periodOrders = computedOrders.filter((order) => inPeriod(order.date));
+  const delivered = periodOrders.filter((order) => order.status === "تم التسليم");
+  const returned = periodOrders.filter((order) => order.status === "مرتجع");
+  const totalSales = delivered.reduce((sum, order) => sum + order.totalSale, 0);
+  const totalCOGS = delivered.reduce((sum, order) => sum + order.totalCost, 0);
+  const totalShip = [...delivered, ...returned].reduce((sum, order) => sum + order.shipCost, 0);
+  const totalCOD = delivered.reduce((sum, order) => sum + order.codFee, 0);
+  const operatingProfit = periodOrders.reduce((sum, order) => sum + order.netProfit, 0);
+  const totalAds = data.ads.filter((ad) => inPeriod(ad.date)).reduce((sum, ad) => sum + Number(ad.amount || 0), 0);
+  const totalFixed = data.fixedCosts.reduce((sum, cost) => sum + Number(cost.amount || 0), 0);
+  const finalProfit = operatingProfit - totalAds - totalFixed;
+  const deliveryRate = delivered.length + returned.length > 0 ? delivered.length / (delivered.length + returned.length) : 0;
+  const productStats = data.products.map((product) => {
+    const productOrders = delivered.filter((order) => order.product === product.name);
+    return { ...product, deliveredCount: productOrders.reduce((sum, order) => sum + Number(order.qty || 0), 0), totalProfit: productOrders.reduce((sum, order) => sum + order.netProfit, 0) };
+  }).sort((a, b) => b.totalProfit - a.totalProfit);
+
+  return (
+    <div className="space-y-5">
+      <div className="rounded-xl border p-3 flex flex-col md:flex-row gap-2 items-end" style={{ borderColor: "#E5D3D5", background: "#FAFAFA" }}>
+        <div className="text-xs font-bold flex-1" style={{ color: BURGUNDY }}>تحليل الفترة</div>
+        <div className="w-full md:w-auto"><label className="text-[10px] text-gray-500">من</label><Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></div>
+        <div className="w-full md:w-auto"><label className="text-[10px] text-gray-500">إلى</label><Input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></div>
+        <Btn variant="secondary" onClick={() => { setFrom(""); setTo(""); }}>كل البيانات</Btn>
+      </div>
+      <div className="text-[10px] text-gray-500">الأوردرات: {periodOrders.length} | المصاريف الثابتة محسوبة وفق البنود المسجلة حاليًا.</div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3"><Card label="إجمالي الأوردرات" value={periodOrders.length} icon={ShoppingCart} /><Card label="تم تسليمها" value={delivered.length} icon={TrendingUp} positive /><Card label="مرتجعة" value={returned.length} icon={TrendingDown} negative /><Card label="نسبة التسليم" value={pct(deliveryRate)} icon={Truck} /></div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3"><Card label="إجمالي المبيعات" value={fmt(totalSales)} /><Card label="تكلفة المنتجات" value={fmt(totalCOGS)} /><Card label="تكلفة الشحن" value={fmt(totalShip)} /><Card label="عمولات التحصيل" value={fmt(totalCOD)} /></div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3"><Card label="الربح التشغيلي" value={fmt(operatingProfit)} positive={operatingProfit >= 0} negative={operatingProfit < 0} /><Card label="مصاريف الإعلانات" value={fmt(totalAds)} /><Card label="المصاريف الثابتة" value={fmt(totalFixed)} /><Card label="صافي الربح النهائي" value={fmt(finalProfit)} big positive={finalProfit >= 0} negative={finalProfit < 0} /></div>
+      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "#E5D3D5" }}><div className="px-3 py-2 text-xs font-bold" style={{ background: SECTION_BG, color: BURGUNDY }}>ترتيب المنتجات حسب الربحية</div><table className="w-full"><thead><tr><Th>المنتج</Th><Th>الكمية المُسلّمة</Th><Th>إجمالي الربح</Th></tr></thead><tbody>{productStats.map((product) => <tr key={product.code}><Td>{product.name}</Td><Td>{product.deliveredCount}</Td><Td className="font-bold" style={{ color: BURGUNDY }}>{fmt(product.totalProfit)}</Td></tr>)}</tbody></table></div>
+    </div>
+  );
+}
+
 function OrdersTab({ data, computedOrders, addRow, removeRow, editRow, readOnly }) {
   const [form, setForm] = useState({ id: "", date: "", customer: "", product: data.products[0]?.name || "", qty: 1, company: data.shippingCompanies[0]?.name || "", status: STATUS_OPTIONS[0], notes: "" });
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [message, setMessage] = useState("");
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredOrders = computedOrders
+    .map((order, index) => ({ order, index }))
+    .filter(({ order }) => statusFilter === "all" || order.status === statusFilter)
+    .filter(({ order }) => !normalizedQuery || [order.id, order.customer, order.product, order.company].some((value) => String(value || "").toLowerCase().includes(normalizedQuery)));
+
+  const addOrder = async () => {
+    const next = { ...form, id: form.id.trim(), customer: form.customer.trim(), qty: Number(form.qty) };
+    if (!next.id || !next.date || !next.customer || !next.product || !next.company || next.qty < 1) {
+      setMessage("أكمل بيانات الأوردر وأدخل كمية صحيحة.");
+      return;
+    }
+    if (computedOrders.some((order) => order.id === next.id)) {
+      setMessage("رقم الأوردر موجود بالفعل. استخدم رقمًا مختلفًا.");
+      return;
+    }
+    const ok = await addRow("orders", next);
+    if (ok) {
+      setMessage("تمت إضافة الأوردر.");
+      setForm({ ...form, id: "", customer: "" });
+    }
+  };
+
   return (
     <div className="space-y-4">
+      <div className="rounded-xl border p-3 flex flex-col md:flex-row gap-2" style={{ borderColor: "#E5D3D5", background: "#FAFAFA" }}>
+        <div className="flex-1 flex items-center gap-2"><Search size={14} color={BURGUNDY} /><Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="ابحث بالرقم أو العميل أو المنتج..." /></div>
+        <div className="flex items-center gap-2"><Filter size={14} color={BURGUNDY} /><Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="all">كل الحالات</option>{STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}</Select></div>
+      </div>
+
       {!readOnly && (
         <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-8 gap-2 items-end" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
           <div><label className="text-[10px] text-gray-500">رقم الأوردر</label><Input value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="ORD-1005" /></div>
           <div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
           <div><label className="text-[10px] text-gray-500">العميل</label><Input value={form.customer} onChange={(e) => setForm({ ...form, customer: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">المنتج</label>
-            <Select value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value })}>
-              {data.products.map((p) => <option key={p.code} value={p.name}>{p.name}</option>)}
-            </Select>
-          </div>
-          <div><label className="text-[10px] text-gray-500">الكمية</label><Input type="number" min="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">شركة الشحن</label>
-            <Select value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })}>
-              {data.shippingCompanies.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-            </Select>
-          </div>
-          <div><label className="text-[10px] text-gray-500">الحالة</label>
-            <Select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
-              {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-            </Select>
-          </div>
-          <Btn icon={Plus} onClick={() => { if (!form.id) return; addRow("orders", form); setForm({ ...form, id: "", customer: "" }); }}>
-            إضافة
-          </Btn>
+          <div><label className="text-[10px] text-gray-500">المنتج</label><Select value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value })}>{data.products.map((p) => <option key={p.code} value={p.name}>{p.name}</option>)}</Select></div>
+          <div><label className="text-[10px] text-gray-500">الكمية</label><Input type="number" min="1" step="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">شركة الشحن</label><Select value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })}>{data.shippingCompanies.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}</Select></div>
+          <div><label className="text-[10px] text-gray-500">الحالة</label><Select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>{STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}</Select></div>
+          <Btn icon={Plus} onClick={addOrder}>إضافة</Btn>
+          {message && <div className="col-span-full text-[10px] text-gray-600">{message}</div>}
         </div>
       )}
 
+      <div className="text-[10px] text-gray-500">عرض {filteredOrders.length} من {computedOrders.length} أوردر</div>
       <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
         <table className="w-full">
-          <thead><tr>
-            <Th>رقم</Th><Th>التاريخ</Th><Th>العميل</Th><Th>المنتج</Th><Th>كمية</Th>
-            <Th>إجمالي البيع</Th><Th>الشحن</Th><Th>شركة الشحن</Th><Th>الحالة</Th><Th>صافي الربح</Th><Th></Th>
-          </tr></thead>
+          <thead><tr><Th>رقم</Th><Th>التاريخ</Th><Th>العميل</Th><Th>المنتج</Th><Th>كمية</Th><Th>إجمالي البيع</Th><Th>الشحن</Th><Th>شركة الشحن</Th><Th>الحالة</Th><Th>صافي الربح</Th><Th></Th></tr></thead>
           <tbody>
-            {computedOrders.map((o, i) => (
-              <tr key={i}>
-                <Td>{o.id}</Td><Td>{o.date}</Td><Td>{o.customer}</Td><Td>{o.product}</Td><Td>{o.qty}</Td>
-                <Td>{fmt(o.totalSale)}</Td><Td>{fmt(o.shipCost)}</Td><Td>{o.company}</Td>
-                <Td>
-                  <Select value={o.status} disabled={readOnly} onChange={(e) => editRow("orders", i, "status", e.target.value)}>
-                    {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </Select>
-                </Td>
+            {filteredOrders.map(({ order: o, index }) => (
+              <tr key={o.id}>
+                <Td>{o.id}</Td><Td>{o.date}</Td><Td>{o.customer}</Td><Td>{o.product}</Td><Td>{o.qty}</Td><Td>{fmt(o.totalSale)}</Td><Td>{fmt(o.shipCost)}</Td><Td>{o.company}</Td>
+                <Td><Select value={o.status} disabled={readOnly} onChange={(e) => editRow("orders", index, "status", e.target.value)}>{STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}</Select></Td>
                 <Td className="font-bold" style={{ color: o.netProfit >= 0 ? "#15803D" : "#B91C1C" }}>{fmt(o.netProfit)}</Td>
-                <Td>{!readOnly && <button onClick={() => removeRow("orders", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
+                <Td>{!readOnly && <button title="حذف الأوردر" onClick={() => window.confirm(`حذف الأوردر ${o.id}؟`) && removeRow("orders", index)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
               </tr>
             ))}
           </tbody>
@@ -586,20 +685,38 @@ function OrdersTab({ data, computedOrders, addRow, removeRow, editRow, readOnly 
 
 function ProductsTab({ data, addRow, removeRow, editRow, readOnly }) {
   const [form, setForm] = useState({ code: "", name: "", price: "", cost: "" });
+  const [message, setMessage] = useState("");
+
+  const addProduct = async () => {
+    const next = { code: form.code.trim(), name: form.name.trim(), price: Number(form.price), cost: Number(form.cost) };
+    if (!next.code || !next.name || !isNonNegativeNumber(next.price) || !isNonNegativeNumber(next.cost)) {
+      setMessage("أدخل كود واسم وسعر وتكلفة صحيحة.");
+      return;
+    }
+    if (data.products.some((product) => product.code === next.code || product.name === next.name)) {
+      setMessage("كود أو اسم المنتج موجود بالفعل.");
+      return;
+    }
+    const productSaved = await addRow("products", next);
+    if (productSaved) {
+      const inventorySaved = await addRow("inventory", { code: next.code, available: 0 });
+      if (inventorySaved) {
+        setMessage("تمت إضافة المنتج وفتح رصيده في المخزون.");
+        setForm({ code: "", name: "", price: "", cost: "" });
+      }
+    }
+  };
+
   return (
     <div className="space-y-4">
       {!readOnly && (
         <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-5 gap-2 items-end" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
           <div><label className="text-[10px] text-gray-500">كود</label><Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} /></div>
           <div><label className="text-[10px] text-gray-500">الاسم</label><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">سعر البيع</label><Input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></div>
-          <div><label className="text-[10px] text-gray-500">التكلفة</label><Input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></div>
-          <Btn icon={Plus} onClick={() => {
-            if (!form.name) return;
-            addRow("products", { ...form, price: Number(form.price) || 0, cost: Number(form.cost) || 0 });
-            addRow("inventory", { code: form.code, available: 0 });
-            setForm({ code: "", name: "", price: "", cost: "" });
-          }}>إضافة</Btn>
+          <div><label className="text-[10px] text-gray-500">سعر البيع</label><Input type="number" min="0" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">التكلفة</label><Input type="number" min="0" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></div>
+          <Btn icon={Plus} onClick={addProduct}>إضافة</Btn>
+          {message && <div className="col-span-full text-[10px] text-gray-600">{message}</div>}
         </div>
       )}
       <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
@@ -607,12 +724,12 @@ function ProductsTab({ data, addRow, removeRow, editRow, readOnly }) {
           <thead><tr><Th>كود</Th><Th>الاسم</Th><Th>سعر البيع</Th><Th>التكلفة</Th><Th>الهامش</Th><Th></Th></tr></thead>
           <tbody>
             {data.products.map((p, i) => (
-              <tr key={i}>
+              <tr key={p.code}>
                 <Td>{p.code}</Td><Td>{p.name}</Td>
-                <Td><Input type="number" disabled={readOnly} value={p.price} onChange={(e) => editRow("products", i, "price", Number(e.target.value))} /></Td>
-                <Td><Input type="number" disabled={readOnly} value={p.cost} onChange={(e) => editRow("products", i, "cost", Number(e.target.value))} /></Td>
+                <Td><Input type="number" min="0" disabled={readOnly} value={p.price} onChange={(e) => editRow("products", i, "price", Number(e.target.value))} /></Td>
+                <Td><Input type="number" min="0" disabled={readOnly} value={p.cost} onChange={(e) => editRow("products", i, "cost", Number(e.target.value))} /></Td>
                 <Td className="font-bold" style={{ color: BURGUNDY }}>{fmt(p.price - p.cost)}</Td>
-                <Td>{!readOnly && <button onClick={() => removeRow("products", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
+                <Td>{!readOnly && <button title="حذف المنتج" onClick={() => window.confirm(`حذف المنتج ${p.name}؟`) && removeRow("products", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
               </tr>
             ))}
           </tbody>
@@ -622,24 +739,77 @@ function ProductsTab({ data, addRow, removeRow, editRow, readOnly }) {
   );
 }
 
-function InventoryTab({ inventoryComputed, editRow, readOnly }) {
+function InventoryTab({ data, inventoryComputed, inventoryMovements, applyInventoryMovement, editRow, readOnly }) {
+  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), code: data.products[0]?.code || "", type: "إضافة", qty: 1, reason: "" });
+  const [message, setMessage] = useState("");
+
+  const submitMovement = async () => {
+    if (!form.date || !form.code || !form.reason.trim() || !Number.isInteger(Number(form.qty)) || Number(form.qty) < 1) {
+      setMessage("أدخل التاريخ والمنتج والكمية والسبب قبل تسجيل الحركة.");
+      return;
+    }
+    const result = await applyInventoryMovement({ ...form, qty: Number(form.qty), reason: form.reason.trim() });
+    if (!result.ok) {
+      setMessage(result.error?.message || "تعذر تسجيل حركة المخزون.");
+      return;
+    }
+    setMessage("تم تسجيل حركة المخزون وتحديث الرصيد.");
+    setForm({ ...form, qty: 1, reason: "" });
+  };
+
   return (
-    <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
-      <table className="w-full">
-        <thead><tr><Th>المنتج</Th><Th>المتاح</Th><Th>المُباع (مُسلّم)</Th><Th>المتبقي</Th><Th>قيمة المخزون</Th><Th>الحالة</Th></tr></thead>
-        <tbody>
-          {inventoryComputed.map((inv, i) => (
-            <tr key={i}>
-              <Td>{inv.name}</Td>
-              <Td><Input type="number" disabled={readOnly} value={inv.available} onChange={(e) => editRow("inventory", i, "available", Number(e.target.value))} /></Td>
-              <Td>{inv.sold}</Td>
-              <Td className="font-bold">{inv.remaining}</Td>
-              <Td>{fmt(inv.value)}</Td>
-              <Td>{inv.remaining < 5 ? <span style={{ color: "#B91C1C" }}>⚠ أعد الطلب</span> : <span style={{ color: "#15803D" }}>✔ متوفر</span>}</Td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="space-y-5">
+      {!readOnly && (
+        <div className="rounded-xl border p-3" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+          <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>تسجيل حركة مخزون</div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
+            <div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
+            <div><label className="text-[10px] text-gray-500">المنتج</label><Select value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })}>{data.products.map((p) => <option key={p.code} value={p.code}>{p.name}</option>)}</Select></div>
+            <div><label className="text-[10px] text-gray-500">نوع الحركة</label><Select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}><option value="إضافة">إضافة</option><option value="خصم">خصم</option></Select></div>
+            <div><label className="text-[10px] text-gray-500">الكمية</label><Input type="number" min="1" step="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></div>
+            <div><label className="text-[10px] text-gray-500">السبب</label><Input value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="شراء، تالف، تسوية..." /></div>
+            <Btn icon={Plus} onClick={submitMovement}>تسجيل</Btn>
+          </div>
+          {message && <div className="mt-2 text-[10px] text-gray-600">{message}</div>}
+        </div>
+      )}
+
+      <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
+        <table className="w-full">
+          <thead><tr><Th>المنتج</Th><Th>الرصيد الأساسي / التسوية</Th><Th>المُباع (مُسلّم)</Th><Th>المتبقي</Th><Th>قيمة المخزون</Th><Th>الحالة</Th></tr></thead>
+          <tbody>
+            {inventoryComputed.map((inv, i) => (
+              <tr key={i}>
+                <Td>{inv.name}</Td>
+                <Td><Input type="number" min="0" disabled={readOnly} value={inv.available} onChange={(e) => editRow("inventory", i, "available", Number(e.target.value))} /></Td>
+                <Td>{inv.sold}</Td>
+                <Td className="font-bold">{inv.remaining}</Td>
+                <Td>{fmt(inv.value)}</Td>
+                <Td>{inv.remaining < 5 ? <span style={{ color: "#B91C1C" }}>⚠ أعد الطلب</span> : <span style={{ color: "#15803D" }}>✔ متوفر</span>}</Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {inventoryMovements.length > 0 && (
+        <div>
+          <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>آخر حركات المخزون</div>
+          <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
+            <table className="w-full">
+              <thead><tr><Th>التاريخ</Th><Th>المنتج</Th><Th>الحركة</Th><Th>الكمية</Th><Th>السبب</Th></tr></thead>
+              <tbody>
+                {inventoryMovements.slice(-12).reverse().map((movement, index) => (
+                  <tr key={movement.id || index}>
+                    <Td>{movement.date}</Td><Td>{data.products.find((p) => p.code === movement.code)?.name || movement.code}</Td>
+                    <Td style={{ color: movement.type === "إضافة" ? "#15803D" : "#B91C1C" }}>{movement.type}</Td><Td>{movement.qty}</Td><Td>{movement.reason}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -819,6 +989,8 @@ function Row({ label, value }) {
 function UsersTab() {
   const [profiles, setProfiles] = useState([]);
   const [invites, setInvites] = useState([]);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditAvailable, setAuditAvailable] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [email, setEmail] = useState("");
@@ -829,13 +1001,16 @@ function UsersTab() {
   const load = async () => {
     setLoading(true);
     setErrorMessage("");
-    const [{ data: profileRows, error: profileError }, { data: inviteRows, error: inviteError }] = await Promise.all([
+    const [{ data: profileRows, error: profileError }, { data: inviteRows, error: inviteError }, { data: auditRows, error: auditError }] = await Promise.all([
       supabase.from("profiles").select("id, email, full_name, role, created_at").order("created_at", { ascending: false }),
       supabase.from("invited_users").select("email, role, invited_by, created_at").order("created_at", { ascending: false }),
+      supabase.from("audit_logs").select("id, actor_id, action, entity_type, entity_id, details, created_at").order("created_at", { ascending: false }).limit(25),
     ]);
     setProfiles(profileRows || []);
     setInvites(inviteRows || []);
-    if (profileError || inviteError) setErrorMessage("تعذر تحميل المستخدمين أو الدعوات. تأكد من تطبيق migration الدعوات ثم حاول مرة أخرى.");
+    setAuditLogs(auditRows || []);
+    setAuditAvailable(!auditError);
+    if (profileError || inviteError) setErrorMessage("تعذر تحميل المستخدمين أو الدعوات. تأكد من تطبيق migrations المطلوبة ثم حاول مرة أخرى.");
     setLoading(false);
   };
 
@@ -844,6 +1019,9 @@ function UsersTab() {
   }, []);
 
   const setRole = async (id, role) => {
+    const target = profiles.find((profile) => profile.id === id);
+    if (role === "owner" && target?.role !== "owner" && !window.confirm(`منح ${target?.email || "هذا المستخدم"} صلاحية مالك يعطيه تحكمًا كاملًا في النظام. هل تريد المتابعة؟`)) return;
+    if (role !== target?.role && role !== "owner" && !window.confirm(`تغيير صلاحية ${target?.email || "هذا المستخدم"} إلى ${roleText(role)}؟`)) return;
     setErrorMessage("");
     setSuccessMessage("");
     const { error } = await supabase.rpc("zaro_set_user_role", { p_user_id: id, p_role: role });
@@ -851,7 +1029,7 @@ function UsersTab() {
       setErrorMessage(error.message || "تعذر تحديث الصلاحية. حاول مرة أخرى.");
       return;
     }
-    setSuccessMessage("تم تحديث الصلاحية.");
+    setSuccessMessage("تم تحديث الصلاحية وتسجيل العملية.");
     load();
   };
 
@@ -859,10 +1037,11 @@ function UsersTab() {
     const normalizedEmail = email.trim().toLowerCase();
     setErrorMessage("");
     setSuccessMessage("");
-    if (!normalizedEmail || !normalizedEmail.includes("@")) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       setErrorMessage("اكتب إيميل صحيحًا أولاً.");
       return;
     }
+    if (inviteRole === "owner" && !window.confirm("هذه الدعوة ستمنح Owner تلقائيًا عند تسجيل الإيميل. هل تريد المتابعة؟")) return;
     setSaving(true);
     const { error } = await supabase.from("invited_users").upsert({ email: normalizedEmail, role: inviteRole });
     setSaving(false);
@@ -871,104 +1050,53 @@ function UsersTab() {
       return;
     }
     setEmail("");
-    setSuccessMessage(`تمت إضافة ${normalizedEmail}. عند التسجيل بنفس الإيميل سيحصل تلقائيًا على صلاحية ${roleText(inviteRole)}.`);
+    setSuccessMessage(`تمت إضافة ${normalizedEmail} بصلاحية ${roleText(inviteRole)}.`);
     load();
   };
 
   const removeInvite = async (inviteEmail) => {
+    if (!window.confirm(`حذف دعوة ${inviteEmail}؟`)) return;
     setErrorMessage("");
     const { error } = await supabase.from("invited_users").delete().eq("email", inviteEmail);
     if (error) {
       setErrorMessage(error.message || "تعذر حذف الدعوة.");
       return;
     }
+    setSuccessMessage("تم حذف الدعوة.");
     load();
   };
 
   const roleText = (r) =>
     r === "pending" ? "بانتظار الموافقة" : r === "owner" ? "مالك" : r === "accountant" ? "محاسب" : "مشاهدة فقط";
+  const actionText = (action) => action === "change_role" ? "تغيير صلاحية" : action === "update_section" ? "تعديل بيانات" : action === "inventory_movement" ? "حركة مخزون" : action;
 
   if (loading) {
-    return (
-      <div className="flex items-center gap-2 text-gray-500 text-xs">
-        <Loader2 className="animate-spin" size={16} /> جاري التحميل...
-      </div>
-    );
+    return <div className="flex items-center gap-2 text-gray-500 text-xs"><Loader2 className="animate-spin" size={16} /> جاري التحميل...</div>;
   }
 
   return (
     <div className="space-y-5">
+      <div className="flex items-center justify-between gap-2"><div className="text-xs text-gray-500">إدارة الدعوات والأدوار وسجل العمليات الحساسة.</div><Btn variant="secondary" icon={RefreshCw} onClick={load}>تحديث</Btn></div>
       {errorMessage && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{errorMessage}</div>}
       {successMessage && <div className="rounded-lg bg-green-50 px-3 py-2 text-xs text-green-700">{successMessage}</div>}
 
       <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
         <div className="text-xs font-bold mb-1" style={{ color: BURGUNDY }}>إضافة شخص جديد</div>
-        <div className="text-[10px] text-gray-500 mb-3">
-          حدّد الإيميل والصلاحية مسبقًا. عندما ينشئ الشخص حسابًا بالإيميل نفسه، سيحصل على الصلاحية المحددة تلقائيًا.
-        </div>
+        <div className="text-[10px] text-gray-500 mb-3">حدّد الإيميل والصلاحية مسبقًا. عند التسجيل بالإيميل نفسه سيحصل الشخص على الصلاحية المحددة تلقائيًا.</div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-end">
-          <div>
-            <label className="text-[10px] text-gray-500">الإيميل</label>
-            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="example@gmail.com" dir="ltr" />
-          </div>
-          <div>
-            <label className="text-[10px] text-gray-500">الصلاحية</label>
-            <Select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
-              <option value="viewer">مشاهدة فقط</option>
-              <option value="accountant">محاسب</option>
-              <option value="owner">مالك</option>
-            </Select>
-          </div>
+          <div><label className="text-[10px] text-gray-500">الإيميل</label><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="example@gmail.com" dir="ltr" /></div>
+          <div><label className="text-[10px] text-gray-500">الصلاحية</label><Select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}><option value="viewer">مشاهدة فقط</option><option value="accountant">محاسب</option><option value="owner">مالك</option></Select></div>
           <Btn icon={Plus} onClick={addInvite} disabled={saving}>{saving ? "جارٍ الحفظ..." : "إضافة"}</Btn>
         </div>
       </div>
 
       {invites.length > 0 && (
-        <div>
-          <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>الدعوات المسبقة</div>
-          <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
-            <table className="w-full">
-              <thead><tr><Th>الإيميل</Th><Th>الصلاحية عند التسجيل</Th><Th>أُضيفت في</Th><Th></Th></tr></thead>
-              <tbody>
-                {invites.map((invite) => (
-                  <tr key={invite.email}>
-                    <Td dir="ltr">{invite.email}</Td>
-                    <Td className="font-bold" style={{ color: BURGUNDY }}>{roleText(invite.role)}</Td>
-                    <Td>{invite.created_at ? new Date(invite.created_at).toLocaleDateString("ar-EG") : "—"}</Td>
-                    <Td><button title="حذف الدعوة" onClick={() => removeInvite(invite.email)}><Trash2 size={13} color="#B91C1C" /></button></Td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <div><div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>الدعوات المسبقة</div><div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}><table className="w-full"><thead><tr><Th>الإيميل</Th><Th>الصلاحية</Th><Th>أُضيفت في</Th><Th></Th></tr></thead><tbody>{invites.map((invite) => <tr key={invite.email}><Td dir="ltr">{invite.email}</Td><Td className="font-bold" style={{ color: BURGUNDY }}>{roleText(invite.role)}</Td><Td>{invite.created_at ? new Date(invite.created_at).toLocaleDateString("ar-EG") : "—"}</Td><Td><button title="حذف الدعوة" onClick={() => removeInvite(invite.email)}><Trash2 size={13} color="#B91C1C" /></button></Td></tr>)}</tbody></table></div></div>
       )}
 
-      <div>
-        <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>المستخدمون الحاليون</div>
-        <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
-          <table className="w-full">
-            <thead><tr><Th>الإيميل</Th><Th>الاسم</Th><Th>الصلاحية الحالية</Th><Th>تغيير الصلاحية</Th></tr></thead>
-            <tbody>
-              {profiles.map((p) => (
-                <tr key={p.id}>
-                  <Td dir="ltr">{p.email}</Td>
-                  <Td>{p.full_name || "—"}</Td>
-                  <Td className="font-bold" style={{ color: p.role === "pending" ? "#B45309" : BURGUNDY }}>{roleText(p.role)}</Td>
-                  <Td>
-                    <Select value={p.role} onChange={(e) => setRole(p.id, e.target.value)}>
-                      <option value="pending">بانتظار الموافقة</option>
-                      <option value="accountant">محاسب</option>
-                      <option value="viewer">مشاهدة فقط</option>
-                      <option value="owner">مالك</option>
-                    </Select>
-                  </Td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <div><div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>المستخدمون الحاليون</div><div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}><table className="w-full"><thead><tr><Th>الإيميل</Th><Th>الاسم</Th><Th>الصلاحية الحالية</Th><Th>تغيير الصلاحية</Th></tr></thead><tbody>{profiles.map((p) => <tr key={p.id}><Td dir="ltr">{p.email}</Td><Td>{p.full_name || "—"}</Td><Td className="font-bold" style={{ color: p.role === "pending" ? "#B45309" : BURGUNDY }}>{roleText(p.role)}</Td><Td><Select value={p.role} onChange={(e) => setRole(p.id, e.target.value)}><option value="pending">بانتظار الموافقة</option><option value="accountant">محاسب</option><option value="viewer">مشاهدة فقط</option><option value="owner">مالك</option></Select></Td></tr>)}</tbody></table></div></div>
+
+      <div><div className="flex items-center gap-1 text-xs font-bold mb-2" style={{ color: BURGUNDY }}><History size={14} /> سجل العمليات</div>{!auditAvailable ? <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">سجل التدقيق سيظهر بعد تطبيق migration الخاصة به.</div> : auditLogs.length === 0 ? <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">لا توجد عمليات مسجلة بعد.</div> : <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}><table className="w-full"><thead><tr><Th>الوقت</Th><Th>العملية</Th><Th>الكيان</Th><Th>المعرف</Th><Th>المستخدم</Th></tr></thead><tbody>{auditLogs.map((log) => <tr key={log.id}><Td>{new Date(log.created_at).toLocaleString("ar-EG")}</Td><Td>{actionText(log.action)}</Td><Td>{log.entity_type}</Td><Td>{log.entity_id || "—"}</Td><Td dir="ltr">{log.actor_id ? `${log.actor_id.slice(0, 8)}…` : "system"}</Td></tr>)}</tbody></table></div>}</div>
     </div>
   );
 }

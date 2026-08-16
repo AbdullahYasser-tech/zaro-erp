@@ -1,3 +1,52 @@
-@tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+button, input, select {
+  transition: border-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease, transform 160ms ease;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid #6E1E24;
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  body {
+    min-width: 320px;
+  }
+
+  .p-5 {
+    padding: 0.75rem;
+  }
+
+  .px-5 {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+
+  table {
+    min-width: 680px;
+  }
+
+  button {
+    min-height: 34px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
