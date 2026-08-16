@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient";
 import {
   LayoutDashboard, Package, ShoppingCart, Boxes, Truck, Wallet,
@@ -366,7 +365,20 @@ export default function ZaroERP({ role, email, onSignOut }) {
 
   // ---------- export ----------
   const exportExcel = () => {
-    const wb = XLSX.utils.book_new();
+    const escapeCsv = (value) => {
+      const text = value === null || value === undefined ? "" : String(value);
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const downloadCsv = (filename, rows) => {
+      const csv = "\uFEFF" + rows.map((row) => row.map(escapeCsv).join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    };
     const dashRows = [
       ["ZARO — لوحة متابعة البزنس"],
       [],
@@ -385,42 +397,13 @@ export default function ZaroERP({ role, email, onSignOut }) {
       ["المنتج الأكثر ربحية", bestProduct ? bestProduct.name : "—"],
       ["أقصى تكلفة شراء (Max CPP)", Math.round(maxCpp)],
     ];
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dashRows), "Dashboard");
+    const rows = [...dashRows];
 
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(
-        computedOrders.map((o) => ({
-          "رقم الأوردر": o.id, التاريخ: o.date, العميل: o.customer, المنتج: o.product, الكمية: o.qty,
-          "سعر الوحدة": o.unitPrice, "إجمالي البيع": o.totalSale, "تكلفة الوحدة": o.unitCost,
-          "إجمالي التكلفة": o.totalCost, "شركة الشحن": o.company, "تكلفة الشحن": o.shipCost,
-          "عمولة التحصيل": Math.round(o.codFee), الحالة: o.status, "صافي الربح": Math.round(o.netProfit), ملاحظات: o.notes,
-        }))
-      ),
-      "الأوردرات"
-    );
+    rows.push([], ["الأوردرات"], ["رقم الأوردر", "التاريخ", "العميل", "المنتج", "الكمية", "سعر الوحدة", "إجمالي البيع", "تكلفة الوحدة", "إجمالي التكلفة", "شركة الشحن", "تكلفة الشحن", "عمولة التحصيل", "الحالة", "صافي الربح", "ملاحظات"], ...computedOrders.map((o) => [o.id, o.date, o.customer, o.product, o.qty, o.unitPrice, o.totalSale, o.unitCost, o.totalCost, o.company, o.shipCost, Math.round(o.codFee), o.status, Math.round(o.netProfit), o.notes]));
 
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(
-        productStats.map((p) => ({
-          كود: p.code, الاسم: p.name, "سعر البيع": p.price, التكلفة: p.cost,
-          "هامش الوحدة": p.price - p.cost, "عدد المُسلّم": p.deliveredCount, "إجمالي الربح": Math.round(p.totalProfit),
-        }))
-      ),
-      "المنتجات"
-    );
+    rows.push([], ["المنتجات"], ["كود", "الاسم", "سعر البيع", "التكلفة", "هامش الوحدة", "عدد المُسلّم", "إجمالي الربح"], ...productStats.map((p) => [p.code, p.name, p.price, p.cost, p.price - p.cost, p.deliveredCount, Math.round(p.totalProfit)]));
 
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(
-        inventoryComputed.map((i) => ({
-          كود: i.code, المنتج: i.name, المتاح: i.available, "المُباع (مُسلّم)": i.sold,
-          المتبقي: i.remaining, "تكلفة الوحدة": i.unitCost, "قيمة المخزون": Math.round(i.value),
-        }))
-      ),
-      "المخزون"
-    );
+    rows.push([], ["المخزون"], ["كود", "المنتج", "المتاح", "المُباع (مُسلّم)", "المتبقي", "تكلفة الوحدة", "قيمة المخزون"], ...inventoryComputed.map((i) => [i.code, i.name, i.available, i.sold, i.remaining, i.unitCost, Math.round(i.value)]));
 
     const shipRows = [
       ["شركات الشحن"],
@@ -431,7 +414,7 @@ export default function ZaroERP({ role, email, onSignOut }) {
       ["التاريخ", "الشركة", "عدد المُسلّم", "المفروض تحصيله", "المستلم فعليًا", "الفرق", "الحالة"],
       ...collectionsComputed.map((c) => [c.date, c.company, c.deliveredCount, Math.round(c.expected), c.received, Math.round(c.diff), c.statusLabel]),
     ];
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(shipRows), "الشحن");
+    rows.push([], ...shipRows);
 
     const expRows = [
       ["مصاريف الإعلانات"],
@@ -442,7 +425,7 @@ export default function ZaroERP({ role, email, onSignOut }) {
       ["الشهر", "البند", "المبلغ"],
       ...data.fixedCosts.map((f) => [f.month, f.item, f.amount]),
     ];
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(expRows), "المصاريف");
+    rows.push([], ...expRows);
 
     const cppRows = [
       ["Max CPP Calculator"],
@@ -452,9 +435,8 @@ export default function ZaroERP({ role, email, onSignOut }) {
       [], ["تكلفة ثابتة لكل أوردر", Math.round(fixedPerOrder)], ["أقصى تكلفة شراء (Max CPP)", Math.round(maxCpp)],
       ["CPP الفعلي الحالي", cpp.actualCpp], ["القرار", decision],
     ];
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cppRows), "Max CPP");
-
-    XLSX.writeFile(wb, `zaro_business_system_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    rows.push([], ...cppRows);
+    downloadCsv(`zaro_business_system_${new Date().toISOString().slice(0, 10)}.csv`, rows);
   };
 
   const tabs = [
