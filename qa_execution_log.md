@@ -19,3 +19,15 @@ No production write was performed. No order, product, expense, invitation, or in
 تمت إزالة `xlsx` من `package.json` و`package-lock.json`. build النهائي مرّ بنجاح، وحجم JavaScript انخفض من نحو 709 kB إلى نحو 425 kB، و`npm audit --omit=dev` أصبح بلا ثغرات.
 
 فحص Supabase القراءة فقط أعاد عدد سجلات `audit_logs` = 0، وهو متوقع لأن اختبار QA لم ينفذ أي كتابة. لا تزال اختبارات RLS لكل دور، والضغط، والاسترجاع، والانقطاع، وmigration rollback بحاجة إلى بيئة اختبار Supabase منفصلة حتى لا تمس بيانات الإنتاج.
+
+## Preview functional smoke
+
+Preview deployment `dpl_EfTuzAedLqNacPGY5dzERktZoYAV` from commit `4d40920` reached `READY`. تسجيل الدخول بالحساب المصرّح به نجح، وظهرت لوحة التحكم بنفس بيانات Supabase الحالية. زر التصدير أنشأ ملف CSV في Downloads. تبويب الأوردرات ظهر وفيه البحث، فلتر الحالة، نموذج الإضافة، عرض 4 من 4 أوردر، وتأكيدات الحذف؛ لم يتم تنفيذ أي تغيير.
+
+اختبار HTTP منخفض الحمل على Preview نفذ 20 طلبًا متتاليًا، وكلها عادت HTTP 200، بمتوسط 0.110 ثانية وأقصى 0.373 ثانية للصفحة الأولى. هذه نتيجة smoke وليست اختبار تحمل أو ضغط إنتاجي.
+
+## Production RLS incident fix
+
+تم تشخيص سبب رسالة `infinite recursion detected in policy for relation profiles`: سياسة قراءة profiles كانت تستعلم من profiles داخل شرط السياسة نفسه. طُبقت migration `20260816170000_fix_profiles_rls_recursion.sql` باستخدام helper آمن `is_current_user_owner()` لتجنب الاستعلام الذاتي.
+
+بعد أول إعادة اختبار ظهر خطأ ثانوي لأن migration سابقة أغلقت `current_user_role()` رغم أن التطبيق الحالي يستدعيها. طُبقت migration `20260816171000_restore_authenticated_current_user_role.sql` لإغلاقها أمام anon والسماح بها للمستخدمين المسجلين فقط. بعد ذلك نجح تسجيل الدخول على `https://zaro-erp.vercel.app/` وظهرت لوحة التحكم والبيانات الحالية دون تعديل بيانات العمل.

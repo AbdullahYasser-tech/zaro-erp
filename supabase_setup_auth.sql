@@ -13,13 +13,12 @@ create table if not exists public.profiles (
 alter table public.profiles enable row level security;
 
 drop policy if exists "read own profile" on public.profiles;
-create policy "read own profile" on public.profiles
-  for select using (auth.uid() = id);
-
 drop policy if exists "owner reads all profiles" on public.profiles;
-create policy "owner reads all profiles" on public.profiles
-  for select using (
-    exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'owner')
+drop policy if exists "profiles are viewable by any authenticated user" on public.profiles;
+create policy "authenticated reads own or owner-visible profiles"
+  for select to authenticated using (
+    id = (select auth.uid())
+    or exists (select 1 from public.profiles p where p.id = (select auth.uid()) and p.role = 'owner')
   );
 
 -- لا تسمح بتعديل profiles مباشرة من المتصفح. تغيير الصلاحيات يتم فقط عبر RPC
@@ -40,8 +39,8 @@ alter table public.invited_users enable row level security;
 drop policy if exists "owner manages invites" on public.invited_users;
 create policy "owner manages invites" on public.invited_users
   for all to authenticated
-  using (exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'owner'))
-  with check (exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'owner'));
+  using (exists (select 1 from public.profiles p where p.id = (select auth.uid()) and p.role = 'owner'))
+  with check (exists (select 1 from public.profiles p where p.id = (select auth.uid()) and p.role = 'owner'));
 
 -- 3) auto-create a profile row whenever someone signs in for the first time
 create or replace function public.handle_new_user()
@@ -136,10 +135,16 @@ begin
 end;
 $$ language plpgsql security definer set search_path = public;
 
--- لا تمنح التنفيذ تلقائياً لأي دور؛ فقط المستخدم المسجل يحتاج هذه الدوال.
-revoke execute on function public.zaro_update_section(text, jsonb) from public;
-revoke execute on function public.zaro_seed(jsonb) from public;
-revoke execute on function public.zaro_set_user_role(uuid, text) from public;
+-- لا تمنح التنفيذ للـanon؛ فقط المستخدم المسجل يحتاج هذه الدوال، وكل دالة تتحقق من الدور داخليًا.
+revoke execute on function public.zaro_update_section(text, jsonb) from public, anon;
+revoke execute on function public.zaro_seed(jsonb) from public, anon;
+revoke execute on function public.zaro_set_user_role(uuid, text) from public, anon;
+do $$ begin
+  if exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = 'current_user_role' and pg_get_function_identity_arguments(p.oid) = '') then
+    revoke execute on function public.current_user_role() from public, anon;
+    grant execute on function public.current_user_role() to authenticated;
+  end if;
+end $$;
 grant execute on function public.zaro_update_section(text, jsonb) to authenticated;
 grant execute on function public.zaro_seed(jsonb) to authenticated;
 grant execute on function public.zaro_set_user_role(uuid, text) to authenticated;
