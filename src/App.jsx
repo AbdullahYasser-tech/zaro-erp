@@ -818,21 +818,25 @@ function Row({ label, value }) {
 
 function UsersTab() {
   const [profiles, setProfiles] = useState([]);
+  const [invites, setInvites] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [email, setEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("viewer");
   const [errorMessage, setErrorMessage] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
 
-  const load = () => {
+  const load = async () => {
     setLoading(true);
     setErrorMessage("");
-    supabase
-      .from("profiles")
-      .select("id, email, full_name, role, created_at")
-      .order("created_at", { ascending: false })
-      .then(({ data, error }) => {
-        setProfiles(data || []);
-        if (error) setErrorMessage("تعذر تحميل المستخدمين. حاول مرة أخرى.");
-        setLoading(false);
-      });
+    const [{ data: profileRows, error: profileError }, { data: inviteRows, error: inviteError }] = await Promise.all([
+      supabase.from("profiles").select("id, email, full_name, role, created_at").order("created_at", { ascending: false }),
+      supabase.from("invited_users").select("email, role, invited_by, created_at").order("created_at", { ascending: false }),
+    ]);
+    setProfiles(profileRows || []);
+    setInvites(inviteRows || []);
+    if (profileError || inviteError) setErrorMessage("تعذر تحميل المستخدمين أو الدعوات. تأكد من تطبيق migration الدعوات ثم حاول مرة أخرى.");
+    setLoading(false);
   };
 
   useEffect(() => {
@@ -840,16 +844,49 @@ function UsersTab() {
   }, []);
 
   const setRole = async (id, role) => {
+    setErrorMessage("");
+    setSuccessMessage("");
     const { error } = await supabase.rpc("zaro_set_user_role", { p_user_id: id, p_role: role });
     if (error) {
-      setErrorMessage("تعذر تحديث الصلاحية. حاول مرة أخرى.");
+      setErrorMessage(error.message || "تعذر تحديث الصلاحية. حاول مرة أخرى.");
+      return;
+    }
+    setSuccessMessage("تم تحديث الصلاحية.");
+    load();
+  };
+
+  const addInvite = async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    setErrorMessage("");
+    setSuccessMessage("");
+    if (!normalizedEmail || !normalizedEmail.includes("@")) {
+      setErrorMessage("اكتب إيميل صحيحًا أولاً.");
+      return;
+    }
+    setSaving(true);
+    const { error } = await supabase.from("invited_users").upsert({ email: normalizedEmail, role: inviteRole });
+    setSaving(false);
+    if (error) {
+      setErrorMessage(error.message || "تعذر حفظ الدعوة. حاول مرة أخرى.");
+      return;
+    }
+    setEmail("");
+    setSuccessMessage(`تمت إضافة ${normalizedEmail}. عند التسجيل بنفس الإيميل سيحصل تلقائيًا على صلاحية ${roleText(inviteRole)}.`);
+    load();
+  };
+
+  const removeInvite = async (inviteEmail) => {
+    setErrorMessage("");
+    const { error } = await supabase.from("invited_users").delete().eq("email", inviteEmail);
+    if (error) {
+      setErrorMessage(error.message || "تعذر حذف الدعوة.");
       return;
     }
     load();
   };
 
   const roleText = (r) =>
-    r === "pending" ? "بانتظار الموافقة" : r === "owner" ? "أونر" : r === "accountant" ? "محاسب" : "مشاهدة فقط";
+    r === "pending" ? "بانتظار الموافقة" : r === "owner" ? "مالك" : r === "accountant" ? "محاسب" : "مشاهدة فقط";
 
   if (loading) {
     return (
@@ -860,41 +897,77 @@ function UsersTab() {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-5">
       {errorMessage && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{errorMessage}</div>}
-      <div className="text-xs text-gray-500">
-        وافق على أي حساب جديد سجّل دخول بجوجل عن طريق تغيير صلاحيته من "بانتظار الموافقة" لأي صلاحية تانية.
+      {successMessage && <div className="rounded-lg bg-green-50 px-3 py-2 text-xs text-green-700">{successMessage}</div>}
+
+      <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+        <div className="text-xs font-bold mb-1" style={{ color: BURGUNDY }}>إضافة شخص جديد</div>
+        <div className="text-[10px] text-gray-500 mb-3">
+          حدّد الإيميل والصلاحية مسبقًا. عندما ينشئ الشخص حسابًا بالإيميل نفسه، سيحصل على الصلاحية المحددة تلقائيًا.
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-end">
+          <div>
+            <label className="text-[10px] text-gray-500">الإيميل</label>
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="example@gmail.com" dir="ltr" />
+          </div>
+          <div>
+            <label className="text-[10px] text-gray-500">الصلاحية</label>
+            <Select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
+              <option value="viewer">مشاهدة فقط</option>
+              <option value="accountant">محاسب</option>
+              <option value="owner">مالك</option>
+            </Select>
+          </div>
+          <Btn icon={Plus} onClick={addInvite} disabled={saving}>{saving ? "جارٍ الحفظ..." : "إضافة"}</Btn>
+        </div>
       </div>
-      <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
-        <table className="w-full">
-          <thead>
-            <tr>
-              <Th>الإيميل</Th>
-              <Th>الاسم</Th>
-              <Th>الصلاحية الحالية</Th>
-              <Th>تغيير الصلاحية</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {profiles.map((p) => (
-              <tr key={p.id}>
-                <Td>{p.email}</Td>
-                <Td>{p.full_name || "—"}</Td>
-                <Td className="font-bold" style={{ color: p.role === "pending" ? "#B45309" : BURGUNDY }}>
-                  {roleText(p.role)}
-                </Td>
-                <Td>
-                  <Select value={p.role} onChange={(e) => setRole(p.id, e.target.value)}>
-                    <option value="pending">بانتظار الموافقة</option>
-                    <option value="accountant">محاسب</option>
-                    <option value="viewer">مشاهدة فقط</option>
-                    <option value="owner">أونر</option>
-                  </Select>
-                </Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+
+      {invites.length > 0 && (
+        <div>
+          <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>الدعوات المسبقة</div>
+          <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
+            <table className="w-full">
+              <thead><tr><Th>الإيميل</Th><Th>الصلاحية عند التسجيل</Th><Th>أُضيفت في</Th><Th></Th></tr></thead>
+              <tbody>
+                {invites.map((invite) => (
+                  <tr key={invite.email}>
+                    <Td dir="ltr">{invite.email}</Td>
+                    <Td className="font-bold" style={{ color: BURGUNDY }}>{roleText(invite.role)}</Td>
+                    <Td>{invite.created_at ? new Date(invite.created_at).toLocaleDateString("ar-EG") : "—"}</Td>
+                    <Td><button title="حذف الدعوة" onClick={() => removeInvite(invite.email)}><Trash2 size={13} color="#B91C1C" /></button></Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>المستخدمون الحاليون</div>
+        <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
+          <table className="w-full">
+            <thead><tr><Th>الإيميل</Th><Th>الاسم</Th><Th>الصلاحية الحالية</Th><Th>تغيير الصلاحية</Th></tr></thead>
+            <tbody>
+              {profiles.map((p) => (
+                <tr key={p.id}>
+                  <Td dir="ltr">{p.email}</Td>
+                  <Td>{p.full_name || "—"}</Td>
+                  <Td className="font-bold" style={{ color: p.role === "pending" ? "#B45309" : BURGUNDY }}>{roleText(p.role)}</Td>
+                  <Td>
+                    <Select value={p.role} onChange={(e) => setRole(p.id, e.target.value)}>
+                      <option value="pending">بانتظار الموافقة</option>
+                      <option value="accountant">محاسب</option>
+                      <option value="viewer">مشاهدة فقط</option>
+                      <option value="owner">مالك</option>
+                    </Select>
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

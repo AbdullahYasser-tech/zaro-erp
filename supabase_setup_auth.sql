@@ -27,13 +27,35 @@ create policy "owner reads all profiles" on public.profiles
 drop policy if exists "owner updates profiles" on public.profiles;
 drop policy if exists "profiles are viewable by any authenticated user" on public.profiles;
 
--- 2) auto-create a profile row (role = pending) whenever someone signs in for the first time
+-- 2) optional pre-invitations: an owner can assign a role before signup
+create table if not exists public.invited_users (
+  email text primary key check (email = lower(email)),
+  role text not null check (role in ('owner','accountant','viewer')),
+  invited_by uuid references public.profiles(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists invited_users_invited_by_idx on public.invited_users(invited_by);
+alter table public.invited_users enable row level security;
+drop policy if exists "owner manages invites" on public.invited_users;
+create policy "owner manages invites" on public.invited_users
+  for all to authenticated
+  using (exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'owner'))
+  with check (exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'owner'));
+
+-- 3) auto-create a profile row whenever someone signs in for the first time
 create or replace function public.handle_new_user()
 returns trigger as $$
+declare
+  v_invited_role text;
 begin
+  select role into v_invited_role from public.invited_users where email = lower(new.email);
   insert into public.profiles (id, email, full_name, role)
-  values (new.id, new.email, new.raw_user_meta_data->>'full_name', 'pending')
+  values (new.id, new.email, new.raw_user_meta_data->>'full_name', coalesce(v_invited_role, 'pending'))
   on conflict (id) do nothing;
+  if v_invited_role is not null then
+    delete from public.invited_users where email = lower(new.email);
+  end if;
   return new;
 end;
 $$ language plpgsql security definer set search_path = public;
