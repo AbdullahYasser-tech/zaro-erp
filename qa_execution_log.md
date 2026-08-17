@@ -54,3 +54,11 @@ Preview deployment `dpl_EfTuzAedLqNacPGY5dzERktZoYAV` from commit `4d40920` reac
 اختبار HTTP منخفض الحمل على `https://zaro-erp.vercel.app/` نفّذ 20 طلبًا متتاليًا؛ عادت جميعها HTTP 200، بمتوسط 0.079 ثانية وحد أقصى 0.596 ثانية. يظل هذا smoke test وليس اختبار تحمل طويل.
 
 محاولتا إنشاء Preview المرتبط بـGitHub للـcommit نفسه (`dpl_8gBwD5njiVdTojRQ99yLrpi9KrBm` و`dpl_6R5k5AdtztbmcHgwyuebGf9e594i`) فشلتا من Vercel برسالة `Resource provisioning failed` مع عدم وجود build/stderr errors. محاولة النشر المباشر البديلة (`dpl_2rPdM49cuv4P5yzox4GiX62RXQUm`) فشلت بالرسالة نفسها؛ لذلك لم يتم تغيير Production ولم يُعلن رابط Preview غير جاهز.
+
+## Persistence incident — 2026-08-17
+
+بعد تسجيل الدخول إلى `https://zaro-erp.vercel.app/` وإعادة تحميله، ظهر الإصدار الإنتاجي القديم: لا يوجد تبويب `تشغيل Owner` ولا أقسام العملاء والموردين والمرتجعات واعتماد المصاريف. البيانات الظاهرة هي 4 أوردرات، وهو ما يطابق البيانات المحفوظة فعليًا في Supabase، لذلك اختفاء ميزات Owner سببه أن Production لم يستقبل commit الجديد بعد فشل Vercel provisioning، وليس حذفًا من Supabase.
+
+قراءة Supabase المحدودة أكدت أن `zaro_state.updated_at` هو `2026-08-11 11:21:47+00`، وعدد الأوردرات 4 والمنتجات 4، وأن أقسام `customers`, `suppliers`, `returns`, `dailyClosures`, و`expenseApprovals` غير موجودة في الحالة الحالية. لم تُنفذ أي كتابة في هذا التشخيص.
+
+تمت إضافة حماية في `src/App.jsx` تمنع عرض `DEFAULT_DATA` عند فشل قراءة `zaro_state` أو فشل seed، وتعرض رسالة خطأ واضحة. كما أصبحت حالة `saveState === error` تعرض للمستخدم أن التعديل لم يُحفظ بدل تركه يبدو محفوظًا ثم يختفي عند Refresh. Build الإصلاح المحلي نجح بحجم 447.58 kB JS و125.20 kB gzip.

@@ -142,18 +142,34 @@ function useZaroData(role) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState("idle");
+  const [loadError, setLoadError] = useState("");
   const skipNextRealtime = React.useRef(false);
 
   useEffect(() => {
     (async () => {
+      setLoadError("");
       const { data: row, error } = await supabase.from("zaro_state").select("data").eq("id", 1).single();
-      const isEmpty = error || !row || !row.data || Object.keys(row.data).length === 0;
+      if (error) {
+        console.error(error);
+        setLoadError(`تعذر تحميل البيانات المحفوظة: ${error.message || "تحقق من الاتصال والصلاحيات"}`);
+        setLoading(false);
+        return;
+      }
+      const isEmpty = !row || !row.data || Object.keys(row.data).length === 0;
       if (isEmpty) {
         if (role === "owner") {
           // أول تشغيل: الأونر بس يقدر يعمل seed للبيانات الافتراضية
-          await supabase.rpc("zaro_seed", { p_data: DEFAULT_DATA });
+          const { error: seedError } = await supabase.rpc("zaro_seed", { p_data: DEFAULT_DATA });
+          if (seedError) {
+            console.error(seedError);
+            setLoadError(`تعذر تهيئة قاعدة البيانات: ${seedError.message || "لم يتم الحفظ"}`);
+            setLoading(false);
+            return;
+          }
+          setData(DEFAULT_DATA);
+        } else {
+          setLoadError("قاعدة البيانات غير مهيأة بعد. اطلب من الـOwner فتح النظام أولًا.");
         }
-        setData(DEFAULT_DATA);
       } else {
         setData({ ...DEFAULT_DATA, ...row.data, inventoryMovements: row.data.inventoryMovements || [] });
       }
@@ -168,7 +184,7 @@ function useZaroData(role) {
           skipNextRealtime.current = false;
           return;
         }
-        setData(payload.new.data);
+        setData({ ...DEFAULT_DATA, ...payload.new.data, inventoryMovements: payload.new.data.inventoryMovements || [] });
       })
       .subscribe();
 
@@ -220,7 +236,7 @@ function useZaroData(role) {
     return { ok: true };
   }, []);
 
-  return { data, saveSection, applyInventoryMovement, loading, saveState };
+  return { data, saveSection, applyInventoryMovement, loading, loadError, saveState };
 }
 
 function computeOrder(order, products, companies) {
@@ -304,17 +320,27 @@ function Btn({ children, onClick, variant = "primary", icon: Icon, ...props }) {
 }
 
 export default function ZaroERP({ role, email, onSignOut }) {
-  const { data, saveSection, applyInventoryMovement, loading, saveState } = useZaroData(role);
+  const { data, saveSection, applyInventoryMovement, loading, loadError, saveState } = useZaroData(role);
   const [tab, setTab] = useState("dashboard");
   const [validationMessage, setValidationMessage] = useState("");
 
-  if (loading || !data) {
+  if (loading) {
     return (
       <div className="flex items-center justify-center h-96 gap-2 text-gray-500">
-        <Loader2 className="animate-spin" size={18} /> جاري التحميل...
+        <Loader2 className="animate-spin" size={18} /> جاري تحميل بيانات النظام...
       </div>
     );
   }
+  if (loadError) {
+    return (
+      <div className="mx-auto mt-16 max-w-xl rounded-xl border border-red-200 bg-red-50 p-5 text-center text-sm text-red-800" role="alert">
+        <div className="font-bold mb-2">لم يتم تحميل البيانات المحفوظة</div>
+        <div className="mb-4">{loadError}</div>
+        <Btn variant="secondary" onClick={() => window.location.reload()}>إعادة المحاولة</Btn>
+      </div>
+    );
+  }
+  if (!data) return null;
 
   const isOwner = role === "owner";
   const canEditOrders = role === "owner" || role === "accountant";
@@ -499,7 +525,7 @@ export default function ZaroERP({ role, email, onSignOut }) {
           <div>
             <div className="font-bold text-sm" style={{ color: BURGUNDY }}>ZARO Business System</div>
             <div className="text-[10px] text-gray-400">
-              {saveState === "saving" ? "بيحفظ لكل المستخدمين..." : saveState === "saved" ? "✔ اتحفظ للجميع" : "قاعدة بيانات مشتركة — أي تعديل يظهر للجميع فورًا"}
+              {saveState === "saving" ? "بيحفظ لكل المستخدمين..." : saveState === "saved" ? "✔ اتحفظ للجميع" : saveState === "error" ? "❌ فشل الحفظ — التعديل لم يُحفظ" : "قاعدة بيانات مشتركة — أي تعديل يظهر للجميع فورًا"}
             </div>
           </div>
         </div>
