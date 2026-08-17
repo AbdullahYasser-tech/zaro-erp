@@ -46,3 +46,11 @@ Preview deployment `dpl_EfTuzAedLqNacPGY5dzERktZoYAV` from commit `4d40920` reac
 - Owner Operations tab rendered successfully with alert center, daily close action, monthly report, JSON backup, JSON restore input, collection settlements, customers, suppliers, returns, and expense approvals.
 - Production data observed read-only during this smoke test: 4 orders, 1 delivered, 1 returned, 4 alerts, 2 open collection differences.
 - No production data was changed during this smoke test.
+
+## 2026-08-17 — Security and deployment smoke
+
+بعد commit `de02476` ورفعه إلى `main`، اختُبر رفض RPC من anon على ثلاث دوال حساسة (`zaro_apply_inventory_movement`, `zaro_update_section`, و`zaro_set_user_role`). عادت الحالات الثلاث HTTP 401 مع `permission denied for function`، والنتيجة `passed=3 failed=0`، دون أي كتابة على الإنتاج.
+
+اختبار HTTP منخفض الحمل على `https://zaro-erp.vercel.app/` نفّذ 20 طلبًا متتاليًا؛ عادت جميعها HTTP 200، بمتوسط 0.079 ثانية وحد أقصى 0.596 ثانية. يظل هذا smoke test وليس اختبار تحمل طويل.
+
+محاولتا إنشاء Preview المرتبط بـGitHub للـcommit نفسه (`dpl_8gBwD5njiVdTojRQ99yLrpi9KrBm` و`dpl_6R5k5AdtztbmcHgwyuebGf9e594i`) فشلتا من Vercel برسالة `Resource provisioning failed` مع عدم وجود build/stderr errors. محاولة النشر المباشر البديلة (`dpl_2rPdM49cuv4P5yzox4GiX62RXQUm`) فشلت بالرسالة نفسها؛ لذلك لم يتم تغيير Production ولم يُعلن رابط Preview غير جاهز.
