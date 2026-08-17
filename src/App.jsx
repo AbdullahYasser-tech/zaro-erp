@@ -3,7 +3,8 @@ import { supabase } from "./supabaseClient";
 import {
   LayoutDashboard, Package, ShoppingCart, Boxes, Truck, Wallet,
   Calculator, Plus, Trash2, Download, Loader2, TrendingUp, TrendingDown, Printer,
-  LogOut, Users, Search, Filter, History, RefreshCw,
+  LogOut, Users, Search, Filter, History, RefreshCw, CalendarCheck, Bell, UserRound,
+  Building2, RotateCcw, CheckCircle2, XCircle, AlertTriangle, FileDown,
 } from "lucide-react";
 
 const PRINT_STYLES = `
@@ -29,10 +30,10 @@ const STATUS_OPTIONS = ["قيد المعالجة", "مؤكد", "تم الشحن"
 
 const DEFAULT_DATA = {
   products: [
-    { code: "WATCH01", name: "ساعة ZARO كلاسيك", price: 1200, cost: 450 },
-    { code: "WALLET01", name: "محفظة جلد طبيعي", price: 450, cost: 150 },
-    { code: "BELT01", name: "حزام جلد مزخرف", price: 350, cost: 100 },
-    { code: "SUNGLASS01", name: "نظارة شمس ZARO", price: 550, cost: 180 },
+    { code: "WATCH01", name: "ساعة ZARO كلاسيك", price: 1200, cost: 450, reorderPoint: 5 },
+    { code: "WALLET01", name: "محفظة جلد طبيعي", price: 450, cost: 150, reorderPoint: 5 },
+    { code: "BELT01", name: "حزام جلد مزخرف", price: 350, cost: 100, reorderPoint: 5 },
+    { code: "SUNGLASS01", name: "نظارة شمس ZARO", price: 550, cost: 180, reorderPoint: 5 },
   ],
   inventory: [
     { code: "WATCH01", available: 40 },
@@ -73,6 +74,11 @@ const DEFAULT_DATA = {
     codFeePct: 0.018, confRate: 0.65, delRate: 0.8,
     expectedOrders: 300, marginPct: 0.1, actualCpp: 90,
   },
+  customers: [],
+  suppliers: [],
+  returns: [],
+  dailyClosures: [],
+  expenseApprovals: [],
 };
 
 const STORAGE_KEY = "zaro-erp-data-v1";
@@ -112,6 +118,22 @@ function validateSection(section, payload) {
   if (section === "cpp") {
     const ratioFields = ["codFeePct", "confRate", "delRate", "marginPct"];
     if (ratioFields.some((field) => !isRatio(payload[field])) || ["salePrice", "cost", "shipFwd", "shipRet", "expectedOrders", "actualCpp"].some((field) => !isNonNegativeNumber(payload[field]))) return "مدخلات Max CPP يجب أن تكون أرقامًا صحيحة والنسب بين 0% و100%.";
+  }
+  if (["customers", "suppliers"].includes(section)) {
+    if (payload.some((row) => !row.id?.trim() || !row.name?.trim())) return "كل سجل يحتاج معرفًا واسمًا.";
+    const ids = new Set();
+    for (const row of payload) { if (ids.has(row.id.trim())) return `المعرف ${row.id} مكرر.`; ids.add(row.id.trim()); }
+  }
+  if (section === "returns") {
+    if (payload.some((row) => !row.id?.trim() || !row.orderId?.trim() || !row.date || !row.product?.trim() || !["pending", "approved", "refunded", "rejected"].includes(row.status) || !Number.isInteger(Number(row.qty)) || Number(row.qty) < 1 || !isNonNegativeNumber(row.refundAmount))) return "بيانات المرتجع تحتاج أوردرًا ومنتجًا وكمية ومبلغًا وحالة صحيحة.";
+  }
+  if (section === "dailyClosures") {
+    if (payload.some((row) => !row.id?.trim() || !row.date || row.status !== "closed" || !Number.isInteger(Number(row.totalOrders)) || Number(row.totalOrders) < 0 || !isNonNegativeNumber(row.totalSales))) return "بيانات إغلاق اليوم غير صالحة.";
+    const dates = new Set();
+    for (const row of payload) { if (dates.has(row.date)) return `اليوم ${row.date} مغلق بالفعل.`; dates.add(row.date); }
+  }
+  if (section === "expenseApprovals") {
+    if (payload.some((row) => !row.id?.trim() || !row.date || !row.type?.trim() || !isNonNegativeNumber(row.amount) || !["pending", "approved", "rejected"].includes(row.status))) return "بيانات اعتماد المصروف غير صالحة.";
   }
   return "";
 }
@@ -447,7 +469,10 @@ export default function ZaroERP({ role, email, onSignOut }) {
     { id: "shipping", label: "الشحن", icon: Truck },
     { id: "expenses", label: "المصاريف", icon: Wallet },
     { id: "cpp", label: "Max CPP", icon: Calculator },
-    ...(isOwner ? [{ id: "users", label: "المستخدمين", icon: Users }] : []),
+    ...(isOwner ? [
+      { id: "ownerOps", label: "تشغيل Owner", icon: Bell },
+      { id: "users", label: "المستخدمين", icon: Users },
+    ] : []),
   ];
 
   const currentTabLabel = tabs.find((t) => t.id === tab)?.label || "";
@@ -484,7 +509,7 @@ export default function ZaroERP({ role, email, onSignOut }) {
             <div className="text-right font-bold" style={{ color: BURGUNDY }} dir="rtl">{roleLabel}</div>
           </div>
           <Btn onClick={() => window.print()} icon={Printer} variant="secondary">طباعة الشاشة دي</Btn>
-          <Btn onClick={exportExcel} icon={Download}>تصدير Excel</Btn>
+          <Btn onClick={exportExcel} icon={Download}>تصدير CSV / Excel</Btn>
           <button onClick={onSignOut} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 px-1" title="تسجيل خروج">
             <LogOut size={15} />
           </button>
@@ -512,6 +537,16 @@ export default function ZaroERP({ role, email, onSignOut }) {
 
       <div className="p-5">
         {tab === "dashboard" && <DashboardTab data={data} computedOrders={computedOrders} />}
+
+        {tab === "ownerOps" && isOwner && (
+          <OwnerOperationsTab
+            data={data}
+            computedOrders={computedOrders}
+            collectionsComputed={collectionsComputed}
+            update={update}
+            readOnly={!isOwner}
+          />
+        )}
 
         {tab === "orders" && (
           <OrdersTab
@@ -666,11 +701,11 @@ function OrdersTab({ data, computedOrders, addRow, removeRow, editRow, readOnly 
 }
 
 function ProductsTab({ data, addRow, removeRow, editRow, readOnly }) {
-  const [form, setForm] = useState({ code: "", name: "", price: "", cost: "" });
+  const [form, setForm] = useState({ code: "", name: "", price: "", cost: "", reorderPoint: 5 });
   const [message, setMessage] = useState("");
 
   const addProduct = async () => {
-    const next = { code: form.code.trim(), name: form.name.trim(), price: Number(form.price), cost: Number(form.cost) };
+    const next = { code: form.code.trim(), name: form.name.trim(), price: Number(form.price), cost: Number(form.cost), reorderPoint: Number(form.reorderPoint) };
     if (!next.code || !next.name || !isNonNegativeNumber(next.price) || !isNonNegativeNumber(next.cost)) {
       setMessage("أدخل كود واسم وسعر وتكلفة صحيحة.");
       return;
@@ -684,7 +719,7 @@ function ProductsTab({ data, addRow, removeRow, editRow, readOnly }) {
       const inventorySaved = await addRow("inventory", { code: next.code, available: 0 });
       if (inventorySaved) {
         setMessage("تمت إضافة المنتج وفتح رصيده في المخزون.");
-        setForm({ code: "", name: "", price: "", cost: "" });
+        setForm({ code: "", name: "", price: "", cost: "", reorderPoint: 5 });
       }
     }
   };
@@ -692,24 +727,26 @@ function ProductsTab({ data, addRow, removeRow, editRow, readOnly }) {
   return (
     <div className="space-y-4">
       {!readOnly && (
-        <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-5 gap-2 items-end" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+        <div className="rounded-xl border p-3 grid grid-cols-2 md:grid-cols-6 gap-2 items-end" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
           <div><label className="text-[10px] text-gray-500">كود</label><Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} /></div>
           <div><label className="text-[10px] text-gray-500">الاسم</label><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
           <div><label className="text-[10px] text-gray-500">سعر البيع</label><Input type="number" min="0" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></div>
           <div><label className="text-[10px] text-gray-500">التكلفة</label><Input type="number" min="0" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></div>
+          <div><label className="text-[10px] text-gray-500">حد إعادة الطلب</label><Input type="number" min="0" value={form.reorderPoint} onChange={(e) => setForm({ ...form, reorderPoint: e.target.value })} /></div>
           <Btn icon={Plus} onClick={addProduct}>إضافة</Btn>
           {message && <div className="col-span-full text-[10px] text-gray-600">{message}</div>}
         </div>
       )}
       <div className="rounded-xl border overflow-x-auto" style={{ borderColor: "#E5D3D5" }}>
         <table className="w-full">
-          <thead><tr><Th>كود</Th><Th>الاسم</Th><Th>سعر البيع</Th><Th>التكلفة</Th><Th>الهامش</Th><Th></Th></tr></thead>
+            <thead><tr><Th>كود</Th><Th>الاسم</Th><Th>سعر البيع</Th><Th>التكلفة</Th><Th>حد إعادة الطلب</Th><Th>الهامش</Th><Th></Th></tr></thead>
           <tbody>
             {data.products.map((p, i) => (
               <tr key={p.code}>
                 <Td>{p.code}</Td><Td>{p.name}</Td>
                 <Td><Input type="number" min="0" disabled={readOnly} value={p.price} onChange={(e) => editRow("products", i, "price", Number(e.target.value))} /></Td>
                 <Td><Input type="number" min="0" disabled={readOnly} value={p.cost} onChange={(e) => editRow("products", i, "cost", Number(e.target.value))} /></Td>
+                <Td><Input type="number" min="0" disabled={readOnly} value={p.reorderPoint ?? 5} onChange={(e) => editRow("products", i, "reorderPoint", Number(e.target.value))} /></Td>
                 <Td className="font-bold" style={{ color: BURGUNDY }}>{fmt(p.price - p.cost)}</Td>
                 <Td>{!readOnly && <button title="حذف المنتج" onClick={() => window.confirm(`حذف المنتج ${p.name}؟`) && removeRow("products", i)}><Trash2 size={13} color="#B91C1C" /></button>}</Td>
               </tr>
@@ -966,6 +1003,179 @@ function Row({ label, value }) {
       <span className="font-bold" style={{ color: CHARCOAL }}>{value}</span>
     </div>
   );
+}
+
+function opStatusText(status) {
+  return status === "pending" ? "معلّق" : status === "approved" ? "معتمد" : status === "refunded" ? "تم رد المبلغ" : status === "rejected" ? "مرفوض" : status === "closed" ? "مغلق" : status;
+}
+
+function OwnerOperationsTab({ data, computedOrders, collectionsComputed, update }) {
+  const [notice, setNotice] = useState("");
+  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", notes: "" });
+  const [supplierForm, setSupplierForm] = useState({ id: "", name: "", phone: "", notes: "" });
+  const [returnForm, setReturnForm] = useState({ orderId: data.orders[0]?.id || "", qty: 1, refundAmount: "", reason: "" });
+  const [expenseForm, setExpenseForm] = useState({ date: new Date().toISOString().slice(0, 10), type: "مصاريف تشغيل", amount: "", notes: "" });
+
+  const customers = data.customers || [];
+  const suppliers = data.suppliers || [];
+  const returns = data.returns || [];
+  const dailyClosures = data.dailyClosures || [];
+  const expenseApprovals = data.expenseApprovals || [];
+  const today = new Date().toISOString().slice(0, 10);
+  const todayOrders = computedOrders.filter((order) => order.date === today);
+  const delivered = computedOrders.filter((order) => order.status === "تم التسليم");
+  const pendingExpenses = expenseApprovals.filter((row) => row.status === "pending");
+  const openReturns = returns.filter((row) => ["pending", "approved"].includes(row.status));
+  const lowStock = data.inventory.map((row) => {
+    const product = data.products.find((item) => item.code === row.code);
+    const sold = delivered.filter((order) => order.product === product?.name).reduce((sum, order) => sum + Number(order.qty || 0), 0);
+    const remaining = Number(row.available || 0) - sold;
+    return { ...row, name: product?.name || row.code, remaining, threshold: Number(product?.reorderPoint ?? 5) };
+  }).filter((row) => row.remaining <= row.threshold);
+  const overdueOrders = computedOrders.filter((order) => ["قيد المعالجة", "مؤكد", "تم الشحن"].includes(order.status) && Math.floor((Date.now() - new Date(order.date).getTime()) / 86400000) >= 3);
+  const collectionIssues = collectionsComputed.filter((row) => !row.settled && Math.abs(Number(row.diff || 0)) > 0.01);
+  const isClosedToday = dailyClosures.some((row) => row.date === today && row.status === "closed");
+  const monthOrders = computedOrders.filter((order) => String(order.date || "").startsWith(reportMonth));
+  const monthDelivered = monthOrders.filter((order) => order.status === "تم التسليم");
+  const monthReturned = monthOrders.filter((order) => order.status === "مرتجع");
+  const monthSales = monthDelivered.reduce((sum, order) => sum + order.totalSale, 0);
+  const monthOperating = monthOrders.reduce((sum, order) => sum + order.netProfit, 0);
+  const monthAds = data.ads.filter((row) => String(row.date || "").startsWith(reportMonth)).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const monthFixed = data.fixedCosts.filter((row) => String(row.month || "").includes(reportMonth) || String(row.month || "").includes("أغسطس") && reportMonth.endsWith("-08")).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const monthNet = monthOperating - monthAds - monthFixed;
+  const notifications = [
+    ...lowStock.map((row) => ({ icon: Boxes, color: "#B91C1C", text: `المخزون منخفض: ${row.name} — المتبقي ${row.remaining}` })),
+    ...overdueOrders.map((row) => ({ icon: AlertTriangle, color: "#B45309", text: `أوردر متأخر يحتاج متابعة: ${row.id} — ${row.status}` })),
+    ...collectionIssues.map((row) => ({ icon: Truck, color: "#B45309", text: `فرق تحصيل يحتاج تسوية: ${row.company} بتاريخ ${row.date}` })),
+    ...pendingExpenses.map((row) => ({ icon: Wallet, color: "#B45309", text: `مصروف بانتظار الاعتماد: ${fmt(row.amount)} — ${row.type}` })),
+    ...(!isClosedToday ? [{ icon: CalendarCheck, color: "#6E1E24", text: `لم يتم إغلاق يوم ${today} بعد.` }] : []),
+  ];
+
+  const addCustomer = async () => {
+    const row = { ...customerForm, id: customerForm.id.trim() || `CUS-${Date.now()}`, name: customerForm.name.trim(), phone: customerForm.phone.trim(), notes: customerForm.notes.trim() };
+    if (!row.name) return setNotice("أدخل اسم العميل أولًا.");
+    if (await update("customers", [...customers, row])) { setNotice("تمت إضافة العميل."); setCustomerForm({ id: "", name: "", phone: "", notes: "" }); }
+  };
+  const addSupplier = async () => {
+    const row = { ...supplierForm, id: supplierForm.id.trim() || `SUP-${Date.now()}`, name: supplierForm.name.trim(), phone: supplierForm.phone.trim(), notes: supplierForm.notes.trim() };
+    if (!row.name) return setNotice("أدخل اسم المورد أولًا.");
+    if (await update("suppliers", [...suppliers, row])) { setNotice("تمت إضافة المورد."); setSupplierForm({ id: "", name: "", phone: "", notes: "" }); }
+  };
+  const addReturn = async () => {
+    const order = data.orders.find((row) => row.id === returnForm.orderId);
+    if (!order) return setNotice("اختر أوردرًا صحيحًا للمرتجع.");
+    const row = { id: `RET-${Date.now()}`, orderId: order.id, date: today, product: order.product, qty: Number(returnForm.qty), refundAmount: Number(returnForm.refundAmount) || 0, reason: returnForm.reason.trim(), status: "pending" };
+    if (!row.reason || row.qty < 1) return setNotice("أدخل كمية وسبب المرتجع.");
+    if (await update("returns", [...returns, row])) { setNotice("تم تسجيل المرتجع للمراجعة."); setReturnForm({ ...returnForm, qty: 1, refundAmount: "", reason: "" }); }
+  };
+  const setReturnStatus = async (id, status) => {
+    const next = returns.map((row) => row.id === id ? { ...row, status } : row);
+    if (await update("returns", next)) setNotice(`تم تحديث حالة المرتجع إلى ${opStatusText(status)}.`);
+  };
+  const addExpenseApproval = async () => {
+    const row = { id: `EXP-${Date.now()}`, ...expenseForm, amount: Number(expenseForm.amount) || 0, status: "pending" };
+    if (!row.date || !row.type.trim() || row.amount < 0) return setNotice("أدخل بيانات المصروف بشكل صحيح.");
+    if (await update("expenseApprovals", [...expenseApprovals, row])) { setNotice("تم إدخال المصروف بانتظار الاعتماد."); setExpenseForm({ ...expenseForm, amount: "", notes: "" }); }
+  };
+  const setExpenseStatus = async (id, status) => {
+    const next = expenseApprovals.map((row) => row.id === id ? { ...row, status } : row);
+    if (await update("expenseApprovals", next)) setNotice(`تم تحديث اعتماد المصروف إلى ${opStatusText(status)}.`);
+  };
+  const settleCollection = async (index) => {
+    const next = data.collections.map((row, rowIndex) => rowIndex === index ? { ...row, settled: true, settledAt: new Date().toISOString() } : row);
+    if (await update("collections", next)) setNotice("تم تسجيل تسوية التحصيل.");
+  };
+  const closeToday = async () => {
+    if (isClosedToday) return setNotice("اليوم مغلق بالفعل.");
+    const snapshot = { id: `CLOSE-${today}`, date: today, totalOrders: todayOrders.length, deliveredCount: todayOrders.filter((row) => row.status === "تم التسليم").length, returnedCount: todayOrders.filter((row) => row.status === "مرتجع").length, totalSales: todayOrders.filter((row) => row.status === "تم التسليم").reduce((sum, row) => sum + row.totalSale, 0), operatingProfit: todayOrders.reduce((sum, row) => sum + row.netProfit, 0), status: "closed", closedAt: new Date().toISOString() };
+    if (await update("dailyClosures", [...dailyClosures, snapshot])) setNotice(`تم إغلاق يوم ${today} واعتماد ملخصه.`);
+  };
+  const downloadBackup = () => {
+    const payload = JSON.stringify({ app: "ZARO ERP", version: 1, exportedAt: new Date().toISOString(), data }, null, 2);
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([payload], { type: "application/json;charset=utf-8" }));
+    link.download = `zaro_backup_${today}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    setNotice("تم تنزيل نسخة احتياطية JSON محلية. احتفظ بها في مكان آمن.");
+  };
+  const restoreBackup = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!window.confirm("سيتم استبدال بيانات النظام الحالية بمحتوى النسخة الاحتياطية. تأكد من وجود نسخة حديثة قبل المتابعة. هل تريد الاستمرار؟")) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (parsed?.app !== "ZARO ERP" || !parsed?.data || typeof parsed.data !== "object" || Array.isArray(parsed.data)) throw new Error("ملف النسخة الاحتياطية غير صالح");
+      const { error } = await supabase.rpc("zaro_restore_backup", { p_data: parsed });
+      if (error) throw error;
+      setNotice("تم استرجاع النسخة الاحتياطية بنجاح. سيتم تحديث الشاشة.");
+      window.setTimeout(() => window.location.reload(), 500);
+    } catch (error) {
+      setNotice(`تعذر استرجاع النسخة الاحتياطية: ${error?.message || "تحقق من الملف والصلاحيات"}`);
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      {notice && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800" role="status">{notice}</div>}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Card label="تنبيهات تحتاج متابعة" value={notifications.length} icon={Bell} negative={notifications.length > 0} />
+        <Card label="مرتجعات مفتوحة" value={openReturns.length} icon={RotateCcw} negative={openReturns.length > 0} />
+        <Card label="مصروفات معلقة" value={pendingExpenses.length} icon={Wallet} negative={pendingExpenses.length > 0} />
+        <Card label="طلبات متأخرة" value={overdueOrders.length} icon={AlertTriangle} negative={overdueOrders.length > 0} />
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+          <div className="flex items-center justify-between gap-2 mb-2"><div className="text-xs font-bold" style={{ color: BURGUNDY }}>الإغلاق اليومي</div><CalendarCheck size={16} color={BURGUNDY} /></div>
+          <div className="text-xs text-gray-600 mb-3">اعتماد ملخص اليوم بعد مراجعة الأوردرات والتحصيلات والمصاريف.</div>
+          <div className="grid grid-cols-2 gap-2 text-xs mb-3"><Row label="أوردرات اليوم" value={todayOrders.length} /><Row label="مبيعات اليوم" value={fmt(todayOrders.filter((row) => row.status === "تم التسليم").reduce((sum, row) => sum + row.totalSale, 0))} /><Row label="تم التسليم" value={todayOrders.filter((row) => row.status === "تم التسليم").length} /><Row label="المرتجع" value={todayOrders.filter((row) => row.status === "مرتجع").length} /></div>
+          <Btn icon={CalendarCheck} onClick={closeToday} disabled={isClosedToday}>{isClosedToday ? "اليوم مغلق" : "اعتماد إغلاق اليوم"}</Btn>
+        </div>
+        <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5" }}>
+          <div className="flex items-center justify-between gap-2 mb-2"><div className="text-xs font-bold" style={{ color: BURGUNDY }}>مركز التنبيهات</div><Bell size={16} color={BURGUNDY} /></div>
+          {notifications.length === 0 ? <div className="text-xs text-green-700 flex items-center gap-1"><CheckCircle2 size={14} /> لا توجد تنبيهات معلقة.</div> : <div className="space-y-2 max-h-40 overflow-auto">{notifications.slice(0, 8).map((item, index) => <div key={index} className="flex items-start gap-2 text-xs text-gray-700"><item.icon size={14} color={item.color} className="mt-0.5 shrink-0" />{item.text}</div>)}</div>}
+        </div>
+      </div>
+
+      <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5" }}>
+        <div className="flex flex-wrap items-end gap-2 mb-3"><div className="text-xs font-bold flex-1" style={{ color: BURGUNDY }}>التقرير الشهري</div><div><label className="text-[10px] text-gray-500">الشهر</label><Input type="month" value={reportMonth} onChange={(e) => setReportMonth(e.target.value)} /></div><><Btn variant="secondary" icon={FileDown} onClick={downloadBackup}>نسخة احتياطية JSON</Btn><label className="inline-flex items-center justify-center rounded-lg border border-[#6E1E24] px-3 py-2 text-xs font-bold text-[#6E1E24] cursor-pointer hover:bg-[#F8EFF0]">استرجاع JSON<input className="hidden" type="file" accept="application/json,.json" onChange={restoreBackup} /></label></></div>
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-2"><Card label="الأوردرات" value={monthOrders.length} /><Card label="التسليم" value={monthDelivered.length} positive /><Card label="المرتجع" value={monthReturned.length} negative={monthReturned.length > 0} /><Card label="المبيعات" value={fmt(monthSales)} /><Card label="مصاريف الإعلان" value={fmt(monthAds)} /><Card label="صافي الشهر" value={fmt(monthNet)} positive={monthNet >= 0} negative={monthNet < 0} /></div>
+      </div>
+
+      <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5" }}>
+        <div className="flex items-center gap-2 text-xs font-bold mb-2" style={{ color: BURGUNDY }}><Truck size={15} /> تسويات الشحن والتحصيلات</div>
+        <div className="rounded border overflow-x-auto"><table className="w-full"><thead><tr><Th>التاريخ</Th><Th>الشركة</Th><Th>المفروض</Th><Th>المستلم</Th><Th>الفرق</Th><Th>الحالة</Th><Th></Th></tr></thead><tbody>{collectionsComputed.map((row, index) => <tr key={`${row.date}-${row.company}-${index}`}><Td>{row.date}</Td><Td>{row.company}</Td><Td>{fmt(row.expected)}</Td><Td>{fmt(row.received)}</Td><Td className="font-bold" style={{ color: row.diff === 0 ? "#15803D" : "#B91C1C" }}>{fmt(row.diff)}</Td><Td>{row.settled ? "✔ تمت التسوية" : row.statusLabel}</Td><Td>{!row.settled && <Btn variant="secondary" onClick={() => settleCollection(index)}>تسجيل التسوية</Btn>}</Td></tr>)}</tbody></table></div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <OperationsEntityCard title="العملاء" icon={UserRound} fields={customerForm} setFields={setCustomerForm} fieldsConfig={[["id", "المعرف"], ["name", "الاسم"], ["phone", "الهاتف"], ["notes", "ملاحظات"]]} onAdd={addCustomer} rows={customers} columns={[["id", "المعرف"], ["name", "الاسم"], ["phone", "الهاتف"]]} />
+        <OperationsEntityCard title="الموردون" icon={Building2} fields={supplierForm} setFields={setSupplierForm} fieldsConfig={[["id", "المعرف"], ["name", "الاسم"], ["phone", "الهاتف"], ["notes", "ملاحظات"]]} onAdd={addSupplier} rows={suppliers} columns={[["id", "المعرف"], ["name", "الاسم"], ["phone", "الهاتف"]]} />
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+          <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>المرتجعات والاسترداد</div>
+          <div className="grid grid-cols-2 gap-2 items-end"><div><label className="text-[10px] text-gray-500">الأوردر</label><Select value={returnForm.orderId} onChange={(e) => setReturnForm({ ...returnForm, orderId: e.target.value })}>{data.orders.map((row) => <option key={row.id} value={row.id}>{row.id} — {row.product}</option>)}</Select></div><div><label className="text-[10px] text-gray-500">الكمية</label><Input type="number" min="1" value={returnForm.qty} onChange={(e) => setReturnForm({ ...returnForm, qty: e.target.value })} /></div><div><label className="text-[10px] text-gray-500">مبلغ الرد</label><Input type="number" min="0" value={returnForm.refundAmount} onChange={(e) => setReturnForm({ ...returnForm, refundAmount: e.target.value })} /></div><div><label className="text-[10px] text-gray-500">السبب</label><Input value={returnForm.reason} onChange={(e) => setReturnForm({ ...returnForm, reason: e.target.value })} /></div></div>
+          <div className="mt-2"><Btn icon={RotateCcw} onClick={addReturn}>تسجيل للمراجعة</Btn></div>
+          <div className="mt-3 rounded border overflow-x-auto"><table className="w-full"><thead><tr><Th>الأوردر</Th><Th>المنتج</Th><Th>المبلغ</Th><Th>الحالة</Th><Th></Th></tr></thead><tbody>{returns.slice(-8).reverse().map((row) => <tr key={row.id}><Td>{row.orderId}</Td><Td>{row.product}</Td><Td>{fmt(row.refundAmount)}</Td><Td>{opStatusText(row.status)}</Td><Td>{row.status === "pending" && <div className="flex gap-1"><button title="اعتماد" onClick={() => setReturnStatus(row.id, "approved")}><CheckCircle2 size={14} color="#15803D" /></button><button title="رفض" onClick={() => setReturnStatus(row.id, "rejected")}><XCircle size={14} color="#B91C1C" /></button></div>}{row.status === "approved" && <button title="تأكيد رد المبلغ" onClick={() => setReturnStatus(row.id, "refunded")}><CheckCircle2 size={14} color="#15803D" /></button>}</Td></tr>)}</tbody></table></div>
+        </div>
+
+        <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}>
+          <div className="text-xs font-bold mb-2" style={{ color: BURGUNDY }}>اعتماد المصاريف</div>
+          <div className="grid grid-cols-2 gap-2 items-end"><div><label className="text-[10px] text-gray-500">التاريخ</label><Input type="date" value={expenseForm.date} onChange={(e) => setExpenseForm({ ...expenseForm, date: e.target.value })} /></div><div><label className="text-[10px] text-gray-500">النوع</label><Input value={expenseForm.type} onChange={(e) => setExpenseForm({ ...expenseForm, type: e.target.value })} /></div><div><label className="text-[10px] text-gray-500">المبلغ</label><Input type="number" min="0" value={expenseForm.amount} onChange={(e) => setExpenseForm({ ...expenseForm, amount: e.target.value })} /></div><div><label className="text-[10px] text-gray-500">ملاحظات</label><Input value={expenseForm.notes} onChange={(e) => setExpenseForm({ ...expenseForm, notes: e.target.value })} /></div></div>
+          <div className="mt-2"><Btn icon={Plus} onClick={addExpenseApproval}>إضافة مصروف للمراجعة</Btn></div>
+          <div className="mt-3 rounded border overflow-x-auto"><table className="w-full"><thead><tr><Th>التاريخ</Th><Th>النوع</Th><Th>المبلغ</Th><Th>الحالة</Th><Th></Th></tr></thead><tbody>{expenseApprovals.slice(-8).reverse().map((row) => <tr key={row.id}><Td>{row.date}</Td><Td>{row.type}</Td><Td>{fmt(row.amount)}</Td><Td>{opStatusText(row.status)}</Td><Td>{row.status === "pending" && <div className="flex gap-1"><button title="اعتماد" onClick={() => setExpenseStatus(row.id, "approved")}><CheckCircle2 size={14} color="#15803D" /></button><button title="رفض" onClick={() => setExpenseStatus(row.id, "rejected")}><XCircle size={14} color="#B91C1C" /></button></div>}</Td></tr>)}</tbody></table></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OperationsEntityCard({ title, icon: Icon, fields, setFields, fieldsConfig, onAdd, rows, columns }) {
+  return <div className="rounded-xl border p-4" style={{ borderColor: "#E5D3D5", background: SECTION_BG }}><div className="flex items-center gap-2 text-xs font-bold mb-2" style={{ color: BURGUNDY }}><Icon size={15} />{title}</div><div className="grid grid-cols-2 gap-2 items-end">{fieldsConfig.map(([key, label]) => <div key={key}><label className="text-[10px] text-gray-500">{label}</label><Input value={fields[key]} onChange={(e) => setFields({ ...fields, [key]: e.target.value })} /></div>)}</div><div className="mt-2"><Btn icon={Plus} onClick={onAdd}>إضافة</Btn></div><div className="mt-3 rounded border overflow-x-auto"><table className="w-full"><thead><tr>{columns.map(([, label]) => <Th key={label}>{label}</Th>)}</tr></thead><tbody>{rows.slice(-6).reverse().map((row) => <tr key={row.id}>{columns.map(([key]) => <Td key={key}>{row[key] || "—"}</Td>)}</tr>)}</tbody></table></div></div>;
 }
 
 function UsersTab() {

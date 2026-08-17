@@ -170,9 +170,9 @@ begin
   end if;
 
   select data into v_data from public.zaro_state where id = 1 for update;
-  select (ordinality - 1)::integer, elem into v_index, v_item
-  from jsonb_array_elements(coalesce(v_data->'inventory', '[]'::jsonb)) with ordinality
-  where elem->>'code' = p_code
+  select (items.ordinality - 1)::integer, items.elem into v_index, v_item
+  from jsonb_array_elements(coalesce(v_data->'inventory', '[]'::jsonb)) with ordinality as items(elem, ordinality)
+  where items.elem->>'code' = p_code
   limit 1;
 
   if v_index is null then

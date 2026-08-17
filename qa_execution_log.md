@@ -31,3 +31,18 @@ Preview deployment `dpl_EfTuzAedLqNacPGY5dzERktZoYAV` from commit `4d40920` reac
 تم تشخيص سبب رسالة `infinite recursion detected in policy for relation profiles`: سياسة قراءة profiles كانت تستعلم من profiles داخل شرط السياسة نفسه. طُبقت migration `20260816170000_fix_profiles_rls_recursion.sql` باستخدام helper آمن `is_current_user_owner()` لتجنب الاستعلام الذاتي.
 
 بعد أول إعادة اختبار ظهر خطأ ثانوي لأن migration سابقة أغلقت `current_user_role()` رغم أن التطبيق الحالي يستدعيها. طُبقت migration `20260816171000_restore_authenticated_current_user_role.sql` لإغلاقها أمام anon والسماح بها للمستخدمين المسجلين فقط. بعد ذلك نجح تسجيل الدخول على `https://zaro-erp.vercel.app/` وظهرت لوحة التحكم والبيانات الحالية دون تعديل بيانات العمل.
+
+## Owner Operations local smoke
+
+بعد تطبيق migration `owner_operations_sections` وبناء النسخة المحلية، نجح تسجيل الدخول بحساب Owner. ظهر تبويب `تشغيل Owner` وفيه: 4 تنبيهات، مرتجعون مفتوحون 0، مصروفات معلقة 0، طلبات متأخرة 1، بطاقة الإغلاق اليومي، مركز التنبيهات، التقرير الشهري، زر نسخة JSON، نماذج العملاء والموردين والمرتجعات واعتماد المصاريف. لم يتم إدخال أو اعتماد أو إغلاق أي بيانات.
+
+اختبار النسخة الاحتياطية المحلية نجح: تم إنشاء `zaro_backup_2026-08-17.json` وظهر مكتملًا في سجل التنزيلات. الاختبار محلي ولم يكتب شيئًا إلى Supabase.
+
+## 2026-08-17 — Local Owner smoke after backup restore UI
+
+- `npm run build`: passed; Vite output 446.67 kB JS / 124.90 kB gzip and 8.68 kB CSS / 2.32 kB gzip.
+- Local preview `http://localhost:5174/`: HTTP 200.
+- Owner login with `by06884@gmail.com`: succeeded; profile loaded as Owner without the previous profiles RLS recursion error.
+- Owner Operations tab rendered successfully with alert center, daily close action, monthly report, JSON backup, JSON restore input, collection settlements, customers, suppliers, returns, and expense approvals.
+- Production data observed read-only during this smoke test: 4 orders, 1 delivered, 1 returned, 4 alerts, 2 open collection differences.
+- No production data was changed during this smoke test.
