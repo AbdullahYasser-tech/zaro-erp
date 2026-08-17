@@ -62,3 +62,9 @@ Preview deployment `dpl_EfTuzAedLqNacPGY5dzERktZoYAV` from commit `4d40920` reac
 قراءة Supabase المحدودة أكدت أن `zaro_state.updated_at` هو `2026-08-11 11:21:47+00`، وعدد الأوردرات 4 والمنتجات 4، وأن أقسام `customers`, `suppliers`, `returns`, `dailyClosures`, و`expenseApprovals` غير موجودة في الحالة الحالية. لم تُنفذ أي كتابة في هذا التشخيص.
 
 تمت إضافة حماية في `src/App.jsx` تمنع عرض `DEFAULT_DATA` عند فشل قراءة `zaro_state` أو فشل seed، وتعرض رسالة خطأ واضحة. كما أصبحت حالة `saveState === error` تعرض للمستخدم أن التعديل لم يُحفظ بدل تركه يبدو محفوظًا ثم يختفي عند Refresh. Build الإصلاح المحلي نجح بحجم 447.58 kB JS و125.20 kB gzip.
+
+## 2026-08-17 — Successful Preview and Refresh persistence smoke
+
+Deployment `dpl_2EkTQTPSrp5WNCtvGAnNzMS4Pc9p` from commit `1fc91bb` reached `READY` after initially remaining in `INITIALIZING` and then `BUILDING`. Preview URL: `https://zaro-kt1nv8t1m-by06884-6458s-projects.vercel.app/`.
+
+تسجيل الدخول بحساب Owner نجح. ظهرت شاشة `تشغيل Owner` بكل أقسامها: 4 تنبيهات، الإغلاق اليومي، التقرير الشهري، النسخة الاحتياطية والاسترجاع، تسويات الشحن، العملاء، الموردون، المرتجعات، واعتماد المصاريف. بعد إعادة تحميل Preview، عاد Dashboard طبيعيًا، وبقي تبويب `تشغيل Owner` ظاهرًا، وعند فتحه ظهرت الأقسام والبيانات نفسها. لم يتم إدخال أو اعتماد أو حذف أو تسوية أي سجل.
