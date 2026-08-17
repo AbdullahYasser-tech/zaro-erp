@@ -68,3 +68,7 @@ Preview deployment `dpl_EfTuzAedLqNacPGY5dzERktZoYAV` from commit `4d40920` reac
 Deployment `dpl_2EkTQTPSrp5WNCtvGAnNzMS4Pc9p` from commit `1fc91bb` reached `READY` after initially remaining in `INITIALIZING` and then `BUILDING`. Preview URL: `https://zaro-kt1nv8t1m-by06884-6458s-projects.vercel.app/`.
 
 تسجيل الدخول بحساب Owner نجح. ظهرت شاشة `تشغيل Owner` بكل أقسامها: 4 تنبيهات، الإغلاق اليومي، التقرير الشهري، النسخة الاحتياطية والاسترجاع، تسويات الشحن، العملاء، الموردون، المرتجعات، واعتماد المصاريف. بعد إعادة تحميل Preview، عاد Dashboard طبيعيًا، وبقي تبويب `تشغيل Owner` ظاهرًا، وعند فتحه ظهرت الأقسام والبيانات نفسها. لم يتم إدخال أو اعتماد أو حذف أو تسوية أي سجل.
+
+## 2026-08-17 — Production deployment and Refresh verification
+
+النشر المباشر النهائي `dpl_H74VZH25Wo63D5JZfjmochYnv9hj` وصل إلى `READY` وأصبح له alias `zaro-erp.vercel.app`. تم فتح الرابط الأساسي بحساب Owner، وظهر تبويب `تشغيل Owner` بكل الميزات الجديدة. بعد عمل Refresh على Production، عادت لوحة Dashboard، وبقي تبويب `تشغيل Owner` موجودًا؛ وبعد فتحه ظهرت التنبيهات والإغلاق اليومي والتقرير الشهري والنسخة الاحتياطية والعملاء والموردون والمرتجعات واعتماد المصاريف وتسويات الشحن. لم يتم تنفيذ أي عملية كتابة أو حذف أو اعتماد على البيانات.
